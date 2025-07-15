@@ -3,7 +3,9 @@ Flight Controller for Custom DIY Drone using ESP32 (NodeMCU ESP-WROOM-32)
 ## Hardware Overview:
 
 - Microcontroller: ESP32 (NodeMCU ESP-WROOM-32)
+- GPS TX: GPIO 16
 - Communication Module: NRF24L01 + PA + LNA (via SPI)
+- channel 76 to avoid wifi interference
 
   - CE: GPIO 4
   - CSN: GPIO 5
@@ -18,6 +20,9 @@ Flight Controller for Custom DIY Drone using ESP32 (NodeMCU ESP-WROOM-32)
   - ESC3: GPIO 14
   - ESC4: GPIO 27
 
+- Use servo library to send PWM signals to ESCs instead of ledwrite.
+- Calibrate ESCS at the startup by MAX throttle at power ON and MIN after 2s delay
+
 - I2C Bus (Shared SDA/SCL):
 
   - SDA: GPIO 21
@@ -26,13 +31,68 @@ Flight Controller for Custom DIY Drone using ESP32 (NodeMCU ESP-WROOM-32)
 - I2C Devices:
 
   - PCA9548A I2C Multiplexer (Address: 0x70; VL53L0X sensors connected to channels 0–3)
-  - BMP280 (Barometric pressure + temperature sensor, Addr: 0x76 or 0x77)
+  - BME280 (Barometric pressure + temperature sensor, Addr: 0x76 or 0x77)
   - MPU6050 (Gyroscope + Accelerometer, Addr: 0x68)
   - VL53L0X x4 (Time-of-Flight distance sensors, all with same address, handled via PCA9548A)
+
+-Analog device
+
+- GUVA-S12SD uv sensor - 36 Pin (SP)
 
 - RGB LEDs (Common Cathode for Navigation Lights):
   - R/G/B pins: GPIOs 25, 26, 32, 33, 14, 27 (exact mapping to be defined)
   - Use PWM or digitalWrite for color control
+
+## Hovering logic
+
+If altitude error ≈ 0, maintain current throttle
+If rising too much, reduce motor speed proportionally
+If falling, increase motor speed
+
+The `hover_throttle` point (i.e., where total motor thrust equals drone weight) is determined experimentally.(Have not fond yet, it wil be updated here when found )
+This value is used as the baseline in altitude PID and mapped to joystick neutral position.
+
+## 📡 NRF24L01 Communication Protocol
+
+The drone uses an **NRF24L01+ PA+LNA** module for long-range wireless communication with a ground remote. To ensure reliable, collision-free communication, the remote initiates all communication, and the drone replies with telemetry using the **ACK payload feature** of the NRF24L01.
+
+---
+
+### 🔁 Acknowledgment Payload Design (Round-Robin Telemetry)
+
+Each time the remote sends a command, the drone responds with an **ACK payload** that includes:
+
+- ✅ **Altitude** — from BME280 (or BMP280)
+- ✅ **GPS coordinates** — from NEO-6M GPS
+- 🔄 **One additional sensor reading**, chosen in a round-robin fashion
+
+This approach enables the drone to share a rich set of telemetry data without exceeding the **32-byte payload limit** of the NRF24L01 module.
+
+#### 🔄 Round-Robin Sensor Rotation:
+
+1. **BME280** (temperature and humidity data)
+2. **Light sensors** (UV from GUVA-S12SD and lux from BH1750)
+3. **Air quality sensors** (TVOC and eCO2 from CCS811 or ENS160)
+
+---
+
+### 📦 ACK Payload Structure
+
+```cpp
+struct AckPayload {
+  float altitude;       // in meters
+  float latitude;       // decimal degrees
+  float longitude;      // decimal degrees
+
+  uint8_t sensorType;   // 0 = MPU6050, 1 = UV/Light, 2 = Air Quality
+
+  union {
+    struct { float ax, ay, az; float gx, gy, gz; } mpu;
+    struct { float uv, lux; } light;
+    struct { float tvoc, co2; } air;
+  } data;
+};
+
 
 ## Power:
 
@@ -43,7 +103,7 @@ Flight Controller for Custom DIY Drone using ESP32 (NodeMCU ESP-WROOM-32)
 
 - Receive control signals from remote via NRF24L01
 - Read IMU data from MPU6050 for orientation
-- Use BMP280 for altitude estimation
+- Use BME280 for altitude estimation
 - Read proximity from 4x VL53L0X sensors via PCA9548A
 - Control ESCs via PWM based on input and sensor feedback (PID control)
 - Light up RGB LEDs based on status/mode
@@ -70,7 +130,7 @@ This firmware powers a custom-built drone using an ESP32 (NodeMCU ESP-WROOM-32).
 | --------------- | ------------------------------------- |
 | ESP32           | Main flight controller + WiFi         |
 | MPU6050         | Roll, pitch, yaw (IMU)                |
-| BMP280 / BME280 | Barometric altitude + temperature     |
+| BME280          | Barometric altitude + temperature + humidity    |
 | VL53L0X ×4      | Obstacle detection (via PCA9548A mux) |
 | CCS811 + AHT21  | CO₂, TVOC, temp, humidity             |
 | BH1750 + GUVA   | Light + UV intensity                  |
@@ -103,3 +163,28 @@ This firmware powers a custom-built drone using an ESP32 (NodeMCU ESP-WROOM-32).
 - **Board:** `esp32doit-devkit-v1`
 - **Framework:** Arduino
 - **Tool:** PlatformIO or Arduino IDE
+
+## Remote Specs
+
+-Microcontroller - ESP32 wroom 32
+
+- 2 Joy Stick modules
+- Joystick module 1
+  -X - GPIO 33
+  -y - GPIO 25
+  -BTN - GPIO 26
+
+- Joystick module 2
+  -X - GPIO 34
+  -y - GPIO 35
+  -BTN - GPIO 32
+
+- Communication Module: NRF24L01 + PA + LNA (via SPI)
+- channel 76 to avoid wifi interference
+
+  - CE: GPIO 4
+  - CSN: GPIO 5
+  - SCK: GPIO 18
+  - MOSI: GPIO 23
+  - MISO: GPIO 19
+```
