@@ -57,3 +57,49 @@ Flight Controller for Custom DIY Drone using ESP32 (NodeMCU ESP-WROOM-32)
 - Use RF24 library for wireless communication
 - Use PCA9548A-compatible I2C switching logic
 - Consider FreeRTOS tasks or timer interrupts for consistent loop timing
+
+# ESP32 Weather Drone Firmware
+
+This firmware powers a custom-built drone using an ESP32 (NodeMCU ESP-WROOM-32). It supports sensor fusion, telemetry, and wireless control.
+
+---
+
+## 🚁 Components Overview
+
+| Component       | Purpose                               |
+| --------------- | ------------------------------------- |
+| ESP32           | Main flight controller + WiFi         |
+| MPU6050         | Roll, pitch, yaw (IMU)                |
+| BMP280 / BME280 | Barometric altitude + temperature     |
+| VL53L0X ×4      | Obstacle detection (via PCA9548A mux) |
+| CCS811 + AHT21  | CO₂, TVOC, temp, humidity             |
+| BH1750 + GUVA   | Light + UV intensity                  |
+| GPS NEO-6M      | Position and velocity                 |
+| NRF24L01+       | RF telemetry and remote control       |
+| ESCs + Motors   | Propulsion (EMAX 980KV motors)        |
+| RGB LEDs        | Navigation + status indicators        |
+| Buzzer          | Status sound                          |
+
+---
+
+## 📡 Communication
+
+- **NRF24L01+** used for telemetry & command between drone and remote
+- **I2C** used for most sensors with level-shifter and pull-ups
+
+---
+
+## ⚙️ Key Features
+
+- Full **PID-based stabilization** (Roll, Pitch, Yaw, Altitude)
+- **Live sensor data** sent via NRF
+- ESCs armed at boot, sensors calibrated dynamically
+- **4-layer PCB** for compact, efficient layout (ESP + MUX underside)
+
+---
+
+## 🛠️ Build Environment
+
+- **Board:** `esp32doit-devkit-v1`
+- **Framework:** Arduino
+- **Tool:** PlatformIO or Arduino IDE
