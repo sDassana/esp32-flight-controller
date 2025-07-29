@@ -33,15 +33,24 @@ Flight Controller for Custom DIY Drone using ESP32 (NodeMCU ESP-WROOM-32)
   - PCA9548A I2C Multiplexer (Address: 0x70; VL53L0X sensors connected to channels 0–3)
   - BME280 (Barometric pressure + temperature sensor, Addr: 0x76 or 0x77)
   - MPU6050 (Gyroscope + Accelerometer, Addr: 0x68)
+  - ENS160 + AHT21 sensor
   - VL53L0X x4 (Time-of-Flight distance sensors, all with same address, handled via PCA9548A)
 
 -Analog device
 
 - GUVA-S12SD uv sensor - 36 Pin (SP)
 
-- RGB LEDs (Common Cathode for Navigation Lights):
-  - R/G/B pins: GPIOs 25, 26, 32, 33, 14, 27 (exact mapping to be defined)
+- LEDs (for Navigation Lights):
+
+  - PIN 32
+  - PIN 33
+  - PIN 25
+  - PIN 17
+  - PIN 02
+  - PIN 15
   - Use PWM or digitalWrite for color control
+
+- Buzzer : GPio 26
 
 ## Hovering logic
 
@@ -78,7 +87,7 @@ This approach enables the drone to share a rich set of telemetry data without ex
 
 ### 📦 ACK Payload Structure
 
-```cpp
+````cpp
 struct AckPayload {
   float altitude;       // in meters
   float latitude;       // decimal degrees
@@ -93,13 +102,12 @@ struct AckPayload {
   } data;
 };
 
-
-## Power:
+##Power
 
 - All components powered via filtered power supply (5V and 3.3V regulated lines)
 - NRF24L01 is powered via a dedicated filtered 3.3V module (NOT from ESP32)
 
-## Goals:
+##Goals:
 
 - Receive control signals from remote via NRF24L01
 - Read IMU data from MPU6050 for orientation
@@ -109,7 +117,7 @@ struct AckPayload {
 - Light up RGB LEDs based on status/mode
 - Build modular, non-blocking code using state machine or task scheduler
 
-## Setup Requirements:
+##Setup_Requirements:
 
 - Use Wire.h for I2C communication
 - Use SPI.h for NRF24L01
@@ -118,7 +126,7 @@ struct AckPayload {
 - Use PCA9548A-compatible I2C switching logic
 - Consider FreeRTOS tasks or timer interrupts for consistent loop timing
 
-# ESP32 Weather Drone Firmware
+#ESP32_Weather_Drone_Firmware
 
 This firmware powers a custom-built drone using an ESP32 (NodeMCU ESP-WROOM-32). It supports sensor fusion, telemetry, and wireless control.
 
@@ -132,7 +140,7 @@ This firmware powers a custom-built drone using an ESP32 (NodeMCU ESP-WROOM-32).
 | MPU6050         | Roll, pitch, yaw (IMU)                |
 | BME280          | Barometric altitude + temperature + humidity    |
 | VL53L0X ×4      | Obstacle detection (via PCA9548A mux) |
-| CCS811 + AHT21  | CO₂, TVOC, temp, humidity             |
+| ENS160 + AHT21  | CO₂, TVOC, temp, humidity             |
 | BH1750 + GUVA   | Light + UV intensity                  |
 | GPS NEO-6M      | Position and velocity                 |
 | NRF24L01+       | RF telemetry and remote control       |
@@ -164,7 +172,41 @@ This firmware powers a custom-built drone using an ESP32 (NodeMCU ESP-WROOM-32).
 - **Framework:** Arduino
 - **Tool:** PlatformIO or Arduino IDE
 
-## Remote Specs
+##Batter_Voltage_Monitoring
+
+The drone monitors the voltage of a 3S LiPo battery using a voltage divider circuit connected to the ESP32's ADC pin (GPIO 35).
+
+###Voltage_Divider_Configuration
+
+The divider is made using standard 10kΩ resistors:
+
+- **Top leg (R1):** 3 × 10kΩ resistors in series → 30kΩ
+- **Bottom leg (R2):** A parallel combination of:
+  - 3 × 10kΩ resistors in series → 30kΩ
+  - 1 × 10kΩ resistor
+
+**Effective bottom resistance (R2):**
+\[
+\frac{1}{R2} = \frac{1}{30k} + \frac{1}{10k} = \frac{4}{30k} \Rightarrow R2 = 7.5kΩ
+\]
+
+**Divider ratio:**
+\[
+V_{out} = V_{in} \times \frac{7.5}{37.5} = V_{in} \times 0.2
+\]
+
+This scales the full 3S LiPo range (up to 12.6V) down to ~2.52V, which is safe for the ESP32 ADC input.
+
+###ADC_Reading_and_Conversion
+
+The ESP32 reads the voltage at pin 35 using its 12-bit ADC and converts it to the actual battery voltage using the following formula:
+
+```cpp
+float vOut = (raw / 4095.0) * 3.3;
+float vIn = vOut * 5.0;
+
+
+#Remote_Specs
 
 -Microcontroller - ESP32 wroom 32
 
@@ -187,4 +229,4 @@ This firmware powers a custom-built drone using an ESP32 (NodeMCU ESP-WROOM-32).
   - SCK: GPIO 18
   - MOSI: GPIO 23
   - MISO: GPIO 19
-```
+````

@@ -24,8 +24,11 @@
 
 // RGB LED Pins for status
 #define LED_R1_PIN 25
-#define LED_G1_PIN 26
+#define LED_G1_PIN 33 // Changed from 26 to avoid conflict with buzzer
 #define LED_B1_PIN 32
+
+// Buzzer Pin (dedicated pin)
+#define BUZZER_PIN 26
 
 // I2C Pins
 #define SDA_PIN 21
@@ -133,11 +136,40 @@ enum ESCState
 ESCState escState = ESC_ARM_MAX;
 unsigned long escArmStart = 0;
 
+// Buzzer control variables
+bool buzzerEnabled = false; // Set to false to disable buzzer by default
+unsigned long buzzerStart = 0;
+unsigned long buzzerDuration = 0;
+bool buzzerActive = false;
+
 void setLEDColor(int r, int g, int b)
 {
     digitalWrite(LED_R1_PIN, r);
     digitalWrite(LED_G1_PIN, g);
     digitalWrite(LED_B1_PIN, b);
+}
+
+void buzzerBeep(unsigned long duration)
+{
+    // Temporarily enable buzzer for important notifications
+    buzzerStart = millis();
+    buzzerDuration = duration;
+    buzzerActive = true;
+    digitalWrite(BUZZER_PIN, HIGH);
+}
+
+void buzzerStop()
+{
+    buzzerActive = false;
+    digitalWrite(BUZZER_PIN, LOW);
+}
+
+void updateBuzzer()
+{
+    if (buzzerActive && (millis() - buzzerStart >= buzzerDuration))
+    {
+        buzzerStop();
+    }
 }
 
 AckPayload prepareAckPayload()
@@ -267,6 +299,10 @@ void setup()
     pinMode(LED_R1_PIN, OUTPUT);
     pinMode(LED_G1_PIN, OUTPUT);
     pinMode(LED_B1_PIN, OUTPUT);
+
+    // Buzzer
+    pinMode(BUZZER_PIN, OUTPUT);
+    digitalWrite(BUZZER_PIN, LOW); // Ensure buzzer starts OFF
 
     // Set LED to RED during initialization
     setLEDColor(HIGH, LOW, LOW);
@@ -416,6 +452,9 @@ void setup()
 
     escArmStart = millis();
     Serial.println("Starting ESC calibration sequence...");
+
+    // Startup beep to confirm system is ready
+    buzzerBeep(200);
 }
 
 void loop()
@@ -497,6 +536,7 @@ void loop()
         if (joyData.btn1)
         {
             escState = ESC_DISARMED;
+            buzzerBeep(500); // Emergency beep
             Serial.println("EMERGENCY STOP!");
             break;
         }
@@ -523,10 +563,14 @@ void loop()
         if (joyData.btn2)
         {
             escState = ESC_READY;
+            buzzerBeep(200); // Re-arm confirmation beep
             Serial.println("Re-armed");
         }
         break;
     }
+
+    // Update buzzer state
+    updateBuzzer();
 
     delay(20); // 50Hz update rate
 }
