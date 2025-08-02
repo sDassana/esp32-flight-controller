@@ -1,5 +1,8 @@
 Flight Controller for Custom DIY Drone using ESP32 (NodeMCU ESP-WROOM-32)
 
+const char *ssid = "Dialog 4G";  
+const char *password = "0N7NT00ANTQ";
+
 ## Hardware Overview:
 
 - Microcontroller: ESP32 (NodeMCU ESP-WROOM-32)
@@ -42,13 +45,24 @@ Flight Controller for Custom DIY Drone using ESP32 (NodeMCU ESP-WROOM-32)
 
 - LEDs (for Navigation Lights):
 
-  - PIN 32
-  - PIN 33
-  - PIN 25
-  - PIN 17
-  - PIN 02
-  - PIN 15
+  - PIN 32 - front right - green
+  - PIN 33 - back right - green
+  - PIN 25 - back left - red
+  - PIN 17 - front center - white
+  - PIN 02 - front left - red
+  - PIN 15 - back center - white
   - Use PWM or digitalWrite for color control
+
+Front/Back Center White LEDs:
+
+- Arming Blink: Slow blink when waiting to arm.
+- Flight Mode On: Solid light.
+- Throttle Sync Pulse: (Optional) Flash intensity reflects throttle level.
+
+Nav Lights (Red/Green):
+
+- Always ON during powered-on state.
+- Helps in identifying orientation at night (Red = left, Green = right).
 
 - Buzzer : GPio 26
 
