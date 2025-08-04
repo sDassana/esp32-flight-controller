@@ -183,20 +183,20 @@ struct PIDParams
     double altitude_kp, altitude_ki, altitude_kd;
 };
 
-// Initialize with refined conservative values for smooth flight
+// Initialize with more aggressive values for better stabilization
 PIDParams pidParams = {
-    // Roll PID - Reduced for smoother response
-    .roll_kp = 1.5,  // Reduced from 2.0
+    // Roll PID - Increased for stronger correction
+    .roll_kp = 3.0,  // Increased from 1.5 for stronger response
     .roll_ki = 0.0,  // Keep at 0 initially
-    .roll_kd = 0.08, // Slightly reduced from 0.1
-    // Pitch PID - Reduced for smoother response
-    .pitch_kp = 1.5,  // Reduced from 2.0
+    .roll_kd = 0.15, // Increased from 0.08 for better damping
+    // Pitch PID - Increased for stronger correction
+    .pitch_kp = 3.0,  // Increased from 1.5 for stronger response
     .pitch_ki = 0.0,  // Keep at 0 initially
-    .pitch_kd = 0.08, // Slightly reduced from 0.1
-    // Yaw PID - Reduced for gentler yaw
-    .yaw_kp = 0.8,  // Reduced from 1.0
+    .pitch_kd = 0.15, // Increased from 0.08 for better damping
+    // Yaw PID - Increased for better authority
+    .yaw_kp = 1.5,  // Increased from 0.8 for better yaw control
     .yaw_ki = 0.0,  // Keep at 0 initially
-    .yaw_kd = 0.03, // Slightly reduced from 0.05
+    .yaw_kd = 0.05, // Increased from 0.03 for better damping
     // Altitude PID
     .altitude_kp = 1.0,
     .altitude_ki = 0.0,
@@ -207,6 +207,34 @@ PID rollPID(&rollInput, &rollOutput, &rollSetpoint, pidParams.roll_kp, pidParams
 PID pitchPID(&pitchInput, &pitchOutput, &pitchSetpoint, pidParams.pitch_kp, pidParams.pitch_ki, pidParams.pitch_kd, DIRECT);
 PID yawPID(&yawInput, &yawOutput, &yawSetpoint, pidParams.yaw_kp, pidParams.yaw_ki, pidParams.yaw_kd, DIRECT);
 PID altitudePID(&altitudeInput, &altitudeOutput, &altitudeSetpoint, pidParams.altitude_kp, pidParams.altitude_ki, pidParams.altitude_kd, DIRECT);
+
+// IMU Calibration Structure
+struct IMUCalibration
+{
+    float roll_offset;
+    float pitch_offset;
+    float yaw_offset;
+    float accel_x_offset;
+    float accel_y_offset;
+    float accel_z_offset;
+    float gyro_x_offset;
+    float gyro_y_offset;
+    float gyro_z_offset;
+    bool calibrated;
+};
+
+// IMU calibration data - will be set during startup calibration
+IMUCalibration imuCal = {
+    .roll_offset = 0.0,
+    .pitch_offset = 0.0,
+    .yaw_offset = 0.0,
+    .accel_x_offset = 0.0,
+    .accel_y_offset = 0.0,
+    .accel_z_offset = 0.0,
+    .gyro_x_offset = 0.0,
+    .gyro_y_offset = 0.0,
+    .gyro_z_offset = 0.0,
+    .calibrated = false};
 
 // Global State Variables
 FlightState flightState;
@@ -222,7 +250,66 @@ struct MotorOutputs
     int motor4; // Back Left
 };
 
+// Debug Information Structure for Web Dashboard
+struct DebugData
+{
+    // Status Section
+    String flight_mode;
+    bool armed;
+    float throttle_input;
+    int throttle_pwm;
+    float roll_angle;
+    float pitch_angle;
+    float yaw_rate;
+    float altitude;
+    float battery_voltage;
+
+    // PID Debug Section
+    bool pid_active;
+    bool pid_enabled_by_throttle;
+    float roll_output;
+    float pitch_output;
+    float yaw_output;
+    float roll_setpoint;
+    float pitch_setpoint;
+    float yaw_setpoint;
+
+    // Calibration Debug Section
+    bool imu_cal_active;
+    float roll_cal_offset;
+    float pitch_cal_offset;
+
+    // Motor Mix Section
+    int base_pwm;
+    int motor1_final;
+    int motor2_final;
+    int motor3_final;
+    int motor4_final;
+    float motor1_offset;
+    float motor2_offset;
+    float motor3_offset;
+    float motor4_offset;
+
+    // Inputs Section
+    float roll_input;
+    float pitch_input;
+    float yaw_input;
+
+    // System Section
+    bool sensors_ok;
+    bool emergency_active;
+    bool imu_calibrated;
+    unsigned long uptime;
+    unsigned int free_heap;
+
+    // Update timestamp
+    unsigned long timestamp;
+};
+
 MotorOutputs motorOutputs;
+
+// Debug data for web dashboard
+DebugData debugData;
 
 // Motor calibration offsets to compensate for mechanical imbalances
 // Negative values reduce motor power, positive values increase it
@@ -234,12 +321,12 @@ struct MotorCalibration
     float motor4_offset; // Back Left (reduce if left side lifts early)
 };
 
-// Initial calibration - reduce left motors since left side lifts early
+// Motor calibration - fixed values based on testing
 MotorCalibration motorCal = {
-    .motor1_offset = 0.0,   // Front Right - no change initially
-    .motor2_offset = 0.0,   // Back Right - no change initially
-    .motor3_offset = -15.0, // Front Left - reduce by 15 PWM units
-    .motor4_offset = -15.0  // Back Left - reduce by 15 PWM units
+    .motor1_offset = -15.0, // Front Right - reduce by 15 PWM units
+    .motor2_offset = -15.0, // Back Right - reduce by 15 PWM units
+    .motor3_offset = -8.0,  // Front Left - reduce by 8 PWM units (fixed one-side lifting)
+    .motor4_offset = -8.0   // Back Left - reduce by 8 PWM units (fixed one-side lifting)
 };
 
 // Function Declarations
@@ -282,6 +369,11 @@ void setup()
     // Initialize hardware
     initializeHardware();
 
+    // Calibrate IMU to set proper setpoints for level flight
+    Serial.println("Starting IMU calibration...");
+    calibrateIMU();
+    Serial.println("IMU calibration completed!");
+
     // Initialize flight state
     flightState.mode = MODE_DISARMED;
     flightState.motors_armed = false;
@@ -299,8 +391,7 @@ void setup()
     // Set initial sensor timestamp to prevent immediate emergency
     sensorData.timestamp = millis();
 
-    // Give system 30 seconds startup grace period
-    static unsigned long startup_time = millis(); // Initialize PID controllers
+    // Initialize PID controllers
     initializePIDControllers();
 
     // Connect to WiFi
@@ -445,19 +536,25 @@ void initializeHardware()
 
 void initializePIDControllers()
 {
-    // Configure Roll PID with very conservative limits
+    // Update PID tuning parameters first
+    rollPID.SetTunings(pidParams.roll_kp, pidParams.roll_ki, pidParams.roll_kd);
+    pitchPID.SetTunings(pidParams.pitch_kp, pidParams.pitch_ki, pidParams.pitch_kd);
+    yawPID.SetTunings(pidParams.yaw_kp, pidParams.yaw_ki, pidParams.yaw_kd);
+    altitudePID.SetTunings(pidParams.altitude_kp, pidParams.altitude_ki, pidParams.altitude_kd);
+
+    // Configure Roll PID with increased limits for better correction authority
     rollPID.SetMode(AUTOMATIC);
-    rollPID.SetOutputLimits(-200, 200); // Further reduced from ±300 to prevent saturation
+    rollPID.SetOutputLimits(-400, 400); // Increased from ±200 for stronger correction
     rollPID.SetSampleTime(CONTROL_LOOP_PERIOD);
 
-    // Configure Pitch PID with very conservative limits
+    // Configure Pitch PID with increased limits for better correction authority
     pitchPID.SetMode(AUTOMATIC);
-    pitchPID.SetOutputLimits(-200, 200); // Further reduced from ±300 to prevent saturation
+    pitchPID.SetOutputLimits(-400, 400); // Increased from ±200 for stronger correction
     pitchPID.SetSampleTime(CONTROL_LOOP_PERIOD);
 
-    // Configure Yaw PID with very conservative limits
+    // Configure Yaw PID with increased limits
     yawPID.SetMode(AUTOMATIC);
-    yawPID.SetOutputLimits(-100, 100); // Further reduced from ±150 for gentle yaw
+    yawPID.SetOutputLimits(-200, 200); // Increased from ±100 for better yaw authority
     yawPID.SetSampleTime(CONTROL_LOOP_PERIOD);
 
     // Configure Altitude PID
@@ -465,7 +562,11 @@ void initializePIDControllers()
     altitudePID.SetOutputLimits(0, 1000); // Throttle addition
     altitudePID.SetSampleTime(CONTROL_LOOP_PERIOD);
 
-    Serial.println("PID controllers initialized with very conservative limits");
+    Serial.println("PID controllers initialized with increased limits for better stabilization");
+    Serial.printf("PID Gains - Roll: P=%.2f I=%.2f D=%.3f, Pitch: P=%.2f I=%.2f D=%.3f, Yaw: P=%.2f I=%.2f D=%.3f\n",
+                  pidParams.roll_kp, pidParams.roll_ki, pidParams.roll_kd,
+                  pidParams.pitch_kp, pidParams.pitch_ki, pidParams.pitch_kd,
+                  pidParams.yaw_kp, pidParams.yaw_ki, pidParams.yaw_kd);
 }
 
 void connectWiFi()
@@ -528,26 +629,87 @@ void controlTask(void *parameter)
         updateStatusLights();
         updateNavigationLights();
 
-        // Debug: Print control input status occasionally
+        // Comprehensive Debug Data Collection for Web Dashboard
         static int debug_counter = 0;
-        if (++debug_counter >= 500)
-        { // Every 5 seconds at 100Hz
+        if (++debug_counter >= 100)
+        { // Every 1 second at 100Hz for smooth web updates
             debug_counter = 0;
-            Serial.printf("Control Debug - arm_switch: %s, mode_switch: %s, armed: %s\n",
-                          controlInputs.arm_switch ? "true" : "false",
-                          controlInputs.mode_switch ? "true" : "false",
-                          flightState.motors_armed ? "true" : "false");
 
-            // Show throttle and motor outputs when armed with detailed mapping
-            if (flightState.motors_armed)
+            // Update debug data structure for web dashboard
+            if (xSemaphoreTake(sensorMutex, pdMS_TO_TICKS(2)) == pdTRUE)
             {
-                // Calculate what the base PWM should be for debug
-                int expectedBasePWM = mapFloat(controlInputs.throttle, 0.0, 1.0, MOTOR_IDLE, MOTOR_MAX);
-                Serial.printf("Throttle: %.2f%% -> Expected BasePWM: %d, Motors: [%d, %d, %d, %d]\n",
-                              controlInputs.throttle * 100.0,
-                              expectedBasePWM,
-                              motorOutputs.motor1, motorOutputs.motor2,
-                              motorOutputs.motor3, motorOutputs.motor4);
+                // Status Section
+                switch (flightState.mode)
+                {
+                case MODE_MANUAL:
+                    debugData.flight_mode = "MANUAL";
+                    break;
+                case MODE_STABILIZE:
+                    debugData.flight_mode = "STABILIZE";
+                    break;
+                case MODE_ALTITUDE_HOLD:
+                    debugData.flight_mode = "ALT_HOLD";
+                    break;
+                case MODE_POSITION_HOLD:
+                    debugData.flight_mode = "POS_HOLD";
+                    break;
+                case MODE_EMERGENCY:
+                    debugData.flight_mode = "EMERGENCY";
+                    break;
+                default:
+                    debugData.flight_mode = "DISARMED";
+                    break;
+                }
+
+                debugData.armed = flightState.motors_armed;
+                debugData.throttle_input = controlInputs.throttle;
+                debugData.throttle_pwm = mapFloat(controlInputs.throttle, 0.0, 1.0, MOTOR_IDLE, MOTOR_MAX);
+                debugData.roll_angle = sensorData.roll_angle;
+                debugData.pitch_angle = sensorData.pitch_angle;
+                debugData.yaw_rate = sensorData.yaw_rate;
+                debugData.altitude = sensorData.altitude_filtered;
+                debugData.battery_voltage = sensorData.battery_voltage;
+
+                // PID Debug Section
+                debugData.pid_active = (flightState.mode >= MODE_STABILIZE);
+                debugData.pid_enabled_by_throttle = (controlInputs.throttle > 0.30); // Show throttle deadband status (30%)
+                debugData.roll_output = rollOutput;
+                debugData.pitch_output = pitchOutput;
+                debugData.yaw_output = yawOutput;
+                debugData.roll_setpoint = rollSetpoint;
+                debugData.pitch_setpoint = pitchSetpoint;
+                debugData.yaw_setpoint = yawSetpoint;
+
+                // Calibration Debug Section
+                debugData.imu_cal_active = imuCal.calibrated;
+                debugData.roll_cal_offset = imuCal.roll_offset;
+                debugData.pitch_cal_offset = imuCal.pitch_offset;
+
+                // Motor Mix Section
+                debugData.base_pwm = debugData.throttle_pwm;
+                debugData.motor1_final = motorOutputs.motor1;
+                debugData.motor2_final = motorOutputs.motor2;
+                debugData.motor3_final = motorOutputs.motor3;
+                debugData.motor4_final = motorOutputs.motor4;
+                debugData.motor1_offset = motorCal.motor1_offset;
+                debugData.motor2_offset = motorCal.motor2_offset;
+                debugData.motor3_offset = motorCal.motor3_offset;
+                debugData.motor4_offset = motorCal.motor4_offset;
+
+                // Inputs Section
+                debugData.roll_input = controlInputs.roll;
+                debugData.pitch_input = controlInputs.pitch;
+                debugData.yaw_input = controlInputs.yaw;
+
+                // System Section
+                debugData.sensors_ok = sensorData.valid;
+                debugData.emergency_active = flightState.emergency_stop;
+                debugData.imu_calibrated = imuCal.calibrated;
+                debugData.uptime = millis();
+                debugData.free_heap = ESP.getFreeHeap();
+                debugData.timestamp = millis();
+
+                xSemaphoreGive(sensorMutex);
             }
         }
 
@@ -565,6 +727,12 @@ void controlTask(void *parameter)
                 motorOutputs.motor2 = basePWM;
                 motorOutputs.motor3 = basePWM;
                 motorOutputs.motor4 = basePWM;
+
+                // Apply motor calibration offsets in manual mode too
+                motorOutputs.motor1 += motorCal.motor1_offset;
+                motorOutputs.motor2 += motorCal.motor2_offset;
+                motorOutputs.motor3 += motorCal.motor3_offset;
+                motorOutputs.motor4 += motorCal.motor4_offset;
 
                 // Constrain all motor outputs to safe range
                 motorOutputs.motor1 = constrain(motorOutputs.motor1, MOTOR_MIN, MOTOR_MAX);
@@ -702,7 +870,7 @@ void updateSensors()
         sensorData.accel_x = accel.acceleration.x;
         sensorData.accel_y = accel.acceleration.y;
         sensorData.accel_z = accel.acceleration.z;
-        sensorData.roll_rate = gyro.gyro.x * 180.0 / PI; // Convert to degrees/sec
+        sensorData.roll_rate = -gyro.gyro.x * 180.0 / PI; // Fix direction to match tilt
         sensorData.pitch_rate = gyro.gyro.y * 180.0 / PI;
         sensorData.yaw_rate = gyro.gyro.z * 180.0 / PI;
         xSemaphoreGive(sensorMutex);
@@ -802,9 +970,27 @@ void calculateOrientation()
         return; // Skip this update if we can't get sensor data
     }
 
+    // Apply IMU calibration offsets if calibrated
+    if (imuCal.calibrated)
+    {
+        accel_x -= imuCal.accel_x_offset;
+        accel_y -= imuCal.accel_y_offset;
+        accel_z -= imuCal.accel_z_offset;
+        gyro_roll -= (-imuCal.gyro_x_offset * 180.0 / PI); // Match corrected direction
+        gyro_pitch -= (imuCal.gyro_y_offset * 180.0 / PI);
+    }
+
     // Calculate angles from accelerometer
-    float accel_roll = atan2(accel_y, sqrt(accel_x * accel_x + accel_z * accel_z)) * 180.0 / PI;
+    // Fix roll axis to match physical tilt direction
+    float accel_roll = -atan2(accel_y, sqrt(accel_x * accel_x + accel_z * accel_z)) * 180.0 / PI;
     float accel_pitch = atan2(-accel_x, sqrt(accel_y * accel_y + accel_z * accel_z)) * 180.0 / PI;
+
+    // Apply calibration offsets to get relative angles from level position
+    if (imuCal.calibrated)
+    {
+        accel_roll -= imuCal.roll_offset;
+        accel_pitch -= imuCal.pitch_offset;
+    }
 
     // Complementary filter (combine gyro and accel)
     const float alpha = 0.98; // Gyro weight (higher = trust gyro more)
@@ -839,17 +1025,26 @@ void runPIDControllers()
     // Set setpoints based on control inputs and flight mode
     if (flightState.mode == MODE_STABILIZE)
     {
-        // In stabilize mode, stick inputs set angle setpoints
-        rollSetpoint = controlInputs.roll * 30.0;   // ±30 degrees max
-        pitchSetpoint = controlInputs.pitch * 30.0; // ±30 degrees max
-        yawSetpoint = controlInputs.yaw * 180.0;    // ±180 deg/sec max
+        // In stabilize mode, stick inputs set angle setpoints relative to calibrated level position
+        if (imuCal.calibrated)
+        {
+            // Setpoints are relative to calibrated level (0° = level position from calibration)
+            // Stick inputs add desired angle deviation from level
+            rollSetpoint = controlInputs.roll * 30.0;   // ±30 degrees max from calibrated level
+            pitchSetpoint = controlInputs.pitch * 30.0; // ±30 degrees max from calibrated level
+            yawSetpoint = controlInputs.yaw * 180.0;    // ±180 deg/sec max (rate control)
 
-        // DEBUG: Print throttle value being used
-        static int throttle_debug_counter = 0;
-        if (++throttle_debug_counter >= 500)
-        { // Every 5 seconds
-            throttle_debug_counter = 0;
-            Serial.printf("PID Debug - controlInputs.throttle: %.3f\n", controlInputs.throttle);
+            // Note: Current sensor readings (rollInput, pitchInput) are already corrected
+            // to be relative to the calibrated level position in calculateOrientation()
+            // So when rollInput = 0°, the drone is at the calibrated level position
+            // When rollSetpoint = 0°, we want the drone to return to calibrated level
+        }
+        else
+        {
+            // Fallback if not calibrated - use raw stick inputs
+            rollSetpoint = controlInputs.roll * 30.0;   // ±30 degrees max
+            pitchSetpoint = controlInputs.pitch * 30.0; // ±30 degrees max
+            yawSetpoint = controlInputs.yaw * 180.0;    // ±180 deg/sec max
         }
     }
 
@@ -859,10 +1054,32 @@ void runPIDControllers()
         // altitudeSetpoint is set when altitude hold is activated
     }
 
-    // Run PID calculations
-    bool rollComputed = rollPID.Compute();
-    bool pitchComputed = pitchPID.Compute();
-    bool yawComputed = yawPID.Compute();
+    // Throttle deadband: Only run PID when there's enough throttle for effective control
+    // This prevents PID windup when drone is on the ground
+    const float THROTTLE_DEADBAND = 0.30; // 30% throttle minimum for PID control (matches liftoff point)
+
+    if (controlInputs.throttle > THROTTLE_DEADBAND)
+    {
+        // Sufficient throttle for control - run PID normally
+        rollPID.SetMode(AUTOMATIC);
+        pitchPID.SetMode(AUTOMATIC);
+        yawPID.SetMode(AUTOMATIC);
+
+        bool rollComputed = rollPID.Compute();
+        bool pitchComputed = pitchPID.Compute();
+        bool yawComputed = yawPID.Compute();
+    }
+    else
+    {
+        // Insufficient throttle - disable PID to prevent windup and set outputs to zero
+        rollPID.SetMode(MANUAL);
+        pitchPID.SetMode(MANUAL);
+        yawPID.SetMode(MANUAL);
+
+        rollOutput = 0.0;
+        pitchOutput = 0.0;
+        yawOutput = 0.0;
+    }
 
     if (flightState.altitude_hold_active)
     {
@@ -874,14 +1091,6 @@ void mixMotorOutputs()
 {
     // Calculate base throttle
     float baseThrottle = controlInputs.throttle;
-
-    // DEBUG: Track throttle value at start of mixing
-    static int throttle_start_debug = 0;
-    if (++throttle_start_debug >= 500)
-    { // Every 5 seconds
-        throttle_start_debug = 0;
-        Serial.printf("Mix Start Debug - baseThrottle: %.3f\n", baseThrottle);
-    }
 
     // In altitude hold mode, use PID output for throttle
     if (flightState.altitude_hold_active)
@@ -895,34 +1104,7 @@ void mixMotorOutputs()
     // Convert throttle to PWM range with better scaling
     // Map 0-100% throttle to 1100-2000 PWM for proper response
 
-    // DEBUG: Check throttle value just before PWM calculation
-    static int pre_pwm_debug = 0;
-    if (++pre_pwm_debug >= 500)
-    { // Every 5 seconds
-        pre_pwm_debug = 0;
-        if (flightState.motors_armed)
-        {
-            Serial.printf("PRE-PWM Debug - baseThrottle just before mapFloat: %.3f\n", baseThrottle);
-        }
-    }
-
     int basePWM = mapFloat(baseThrottle, 0.0, 1.0, MOTOR_IDLE, MOTOR_MAX);
-
-    // DEBUG: Detailed PWM calculation tracking
-    static int pwm_debug_counter = 0;
-    if (++pwm_debug_counter >= 500)
-    { // Every 5 seconds
-        pwm_debug_counter = 0;
-        if (flightState.motors_armed)
-        {
-            Serial.printf("PWM Calc Debug - Input: %.3f, MOTOR_IDLE: %d, MOTOR_MAX: %d, Result: %d\n",
-                          baseThrottle, MOTOR_IDLE, MOTOR_MAX, basePWM);
-            // Manual calculation check
-            float manual_calc = baseThrottle * (MOTOR_MAX - MOTOR_IDLE) + MOTOR_IDLE;
-            Serial.printf("Manual Calc Check - (%.3f * (%d - %d)) + %d = %.1f\n",
-                          baseThrottle, MOTOR_MAX, MOTOR_IDLE, MOTOR_IDLE, manual_calc);
-        }
-    }
 
     // Apply PID corrections with minimal adaptive scaling
     // Keep PID scaling very close to 1.0 to preserve throttle response
@@ -960,24 +1142,6 @@ void mixMotorOutputs()
     // Disabled motor saturation handling - causing throttle drops
     // The PID corrections are already limited to ±200, so saturation shouldn't occur
     // Let the final safety constraints handle any edge cases
-
-    // DEBUG: Add motor calibration info to debug output
-    static int motor_debug_counter = 0;
-    if (++motor_debug_counter >= 500)
-    { // Every 5 seconds
-        motor_debug_counter = 0;
-        if (flightState.motors_armed)
-        {
-            Serial.printf("Motor Mix Debug - BasePWM: %d, PID Scale: %.3f\n", basePWM, pidScale);
-            Serial.printf("PID Outputs - Roll: %.1f, Pitch: %.1f, Yaw: %.1f\n",
-                          rollOutput, pitchOutput, yawOutput);
-            Serial.printf("Scaled PID - Roll: %.1f, Pitch: %.1f, Yaw: %.1f\n",
-                          scaledRollOutput, scaledPitchOutput, scaledYawOutput);
-            Serial.printf("Motor Calibration - M1: %.1f, M2: %.1f, M3: %.1f, M4: %.1f\n",
-                          motorCal.motor1_offset, motorCal.motor2_offset,
-                          motorCal.motor3_offset, motorCal.motor4_offset);
-        }
-    }
 
     // Final safety constraints
     motorOutputs.motor1 = constrain(motorOutputs.motor1, MOTOR_MIN, MOTOR_MAX);
@@ -1204,6 +1368,164 @@ float constrainFloat(float value, float min_val, float max_val)
     return value;
 }
 
+void calibrateIMU()
+{
+    Serial.println("===== IMU CALIBRATION STARTING =====");
+    Serial.println("Place drone on FLAT GROUND and keep STATIONARY during calibration!");
+    Serial.println("This calibration compensates for IMU mounting misalignment.");
+    Serial.println("Calibration will take 15 seconds...");
+
+    // Visual indication of calibration - blink all LEDs
+    for (int i = 0; i < 5; i++)
+    {
+        digitalWrite(LED_R1_PIN, HIGH);
+        digitalWrite(LED_G1_PIN, HIGH);
+        digitalWrite(LED_B1_PIN, HIGH);
+        digitalWrite(NAV_FRONT_RIGHT_GREEN, LOW);
+        digitalWrite(NAV_BACK_RIGHT_GREEN, LOW);
+        digitalWrite(NAV_BACK_LEFT_RED, LOW);
+        digitalWrite(NAV_FRONT_LEFT_RED, LOW);
+        delay(200);
+
+        digitalWrite(LED_R1_PIN, LOW);
+        digitalWrite(LED_G1_PIN, LOW);
+        digitalWrite(LED_B1_PIN, LOW);
+        digitalWrite(NAV_FRONT_RIGHT_GREEN, HIGH);
+        digitalWrite(NAV_BACK_RIGHT_GREEN, HIGH);
+        digitalWrite(NAV_BACK_LEFT_RED, HIGH);
+        digitalWrite(NAV_FRONT_LEFT_RED, HIGH);
+        delay(200);
+    }
+
+    // Calibration beep sequence
+    for (int i = 0; i < 3; i++)
+    {
+        digitalWrite(BUZZER_PIN, HIGH);
+        delay(100);
+        digitalWrite(BUZZER_PIN, LOW);
+        delay(100);
+    }
+
+    delay(2000); // Wait 2 seconds before starting calibration
+
+    // Reset calibration values
+    imuCal.roll_offset = 0.0;
+    imuCal.pitch_offset = 0.0;
+    imuCal.yaw_offset = 0.0;
+    imuCal.accel_x_offset = 0.0;
+    imuCal.accel_y_offset = 0.0;
+    imuCal.accel_z_offset = 0.0;
+    imuCal.gyro_x_offset = 0.0;
+    imuCal.gyro_y_offset = 0.0;
+    imuCal.gyro_z_offset = 0.0;
+
+    // Extended calibration for better accuracy with longer samples
+    const int numSamples = 1500; // 15 seconds at ~100Hz for higher precision
+    float accel_x_sum = 0, accel_y_sum = 0, accel_z_sum = 0;
+    float gyro_x_sum = 0, gyro_y_sum = 0, gyro_z_sum = 0;
+    int validSamples = 0;
+
+    Serial.println("Collecting extended calibration samples for precise mounting offset compensation...");
+
+    for (int i = 0; i < numSamples; i++)
+    {
+        sensors_event_t accel, gyro, temp;
+        if (mpu.getEvent(&accel, &gyro, &temp))
+        {
+            accel_x_sum += accel.acceleration.x;
+            accel_y_sum += accel.acceleration.y;
+            accel_z_sum += accel.acceleration.z;
+            gyro_x_sum += gyro.gyro.x;
+            gyro_y_sum += gyro.gyro.y;
+            gyro_z_sum += gyro.gyro.z;
+            validSamples++;
+        }
+
+        // Progress indication
+        if (i % 150 == 0)
+        {
+            Serial.printf("Calibration progress: %d%%\n", (i * 100) / numSamples);
+            // Brief beep for progress
+            digitalWrite(BUZZER_PIN, HIGH);
+            delay(30);
+            digitalWrite(BUZZER_PIN, LOW);
+        }
+
+        delay(10); // ~100Hz sampling rate
+    }
+
+    if (validSamples > 750) // Need at least 750 valid samples for precision
+    {
+        // Calculate sensor offsets
+        imuCal.accel_x_offset = accel_x_sum / validSamples;
+        imuCal.accel_y_offset = accel_y_sum / validSamples;
+        imuCal.accel_z_offset = (accel_z_sum / validSamples) - 9.81; // Remove gravity from Z-axis
+        imuCal.gyro_x_offset = gyro_x_sum / validSamples;
+        imuCal.gyro_y_offset = gyro_y_sum / validSamples;
+        imuCal.gyro_z_offset = gyro_z_sum / validSamples;
+
+        // Calculate the current "level" angles from flat ground position
+        // These represent the IMU mounting misalignment relative to the drone frame
+        float raw_roll = atan2(imuCal.accel_y_offset, sqrt(imuCal.accel_x_offset * imuCal.accel_x_offset + (imuCal.accel_z_offset + 9.81) * (imuCal.accel_z_offset + 9.81))) * 180.0 / PI;
+        float raw_pitch = atan2(-imuCal.accel_x_offset, sqrt(imuCal.accel_y_offset * imuCal.accel_y_offset + (imuCal.accel_z_offset + 9.81) * (imuCal.accel_z_offset + 9.81))) * 180.0 / PI;
+
+        // Store these as the offsets to subtract from future angle calculations
+        // This makes the current flat ground position read as 0°, 0°
+        imuCal.roll_offset = raw_roll;
+        imuCal.pitch_offset = raw_pitch;
+        imuCal.yaw_offset = 0.0; // Yaw reference is relative
+
+        imuCal.calibrated = true;
+
+        Serial.println("===== IMU CALIBRATION COMPLETED =====");
+        Serial.printf("Accelerometer offsets: X=%.4f, Y=%.4f, Z=%.4f m/s²\n",
+                      imuCal.accel_x_offset, imuCal.accel_y_offset, imuCal.accel_z_offset);
+        Serial.printf("Gyroscope offsets: X=%.4f, Y=%.4f, Z=%.4f rad/s\n",
+                      imuCal.gyro_x_offset, imuCal.gyro_y_offset, imuCal.gyro_z_offset);
+        Serial.printf("IMU mounting angle offsets: Roll=%.3f°, Pitch=%.3f°\n",
+                      imuCal.roll_offset, imuCal.pitch_offset);
+        Serial.println("Current flat ground position will now read as 0°, 0° (perfect level).");
+        Serial.println("PID setpoints for stabilize mode will be relative to this calibrated level position.");
+
+        // Success beep sequence
+        for (int i = 0; i < 3; i++)
+        {
+            digitalWrite(BUZZER_PIN, HIGH);
+            delay(200);
+            digitalWrite(BUZZER_PIN, LOW);
+            delay(100);
+        }
+
+        // Green LED on to indicate successful calibration
+        digitalWrite(LED_G1_PIN, HIGH);
+        delay(2000);
+        digitalWrite(LED_G1_PIN, LOW);
+    }
+    else
+    {
+        Serial.println("===== IMU CALIBRATION FAILED =====");
+        Serial.printf("Not enough valid samples: %d/%d\n", validSamples, numSamples);
+        Serial.println("Check IMU connection and try again.");
+        Serial.println("Ensure drone is completely stationary during calibration.");
+
+        // Error beep sequence
+        for (int i = 0; i < 5; i++)
+        {
+            digitalWrite(BUZZER_PIN, HIGH);
+            delay(100);
+            digitalWrite(BUZZER_PIN, LOW);
+            delay(100);
+        }
+
+        // Red LED on to indicate failed calibration
+        digitalWrite(LED_R1_PIN, HIGH);
+        delay(3000);
+        digitalWrite(LED_R1_PIN, LOW);
+    }
+
+    Serial.println("=====================================");
+}
+
 // ================================
 // WEB SERVER SETUP
 // ================================
@@ -1309,19 +1631,19 @@ void setupWebServer()
             <div class="controls">
                 <div>
                     <h3>Motor 1 (Front Right)</h3>
-                    <label>Offset: <input type="number" id="motor1_offset" value="0" step="1" min="-50" max="50" onchange="updateMotorCal()"></label>
+                    <label>Offset: <input type="number" id="motor1_offset" value="-15" step="1" min="-50" max="50" onchange="updateMotorCal()"></label>
                 </div>
                 <div>
                     <h3>Motor 2 (Back Right)</h3>
-                    <label>Offset: <input type="number" id="motor2_offset" value="0" step="1" min="-50" max="50" onchange="updateMotorCal()"></label>
+                    <label>Offset: <input type="number" id="motor2_offset" value="-15" step="1" min="-50" max="50" onchange="updateMotorCal()"></label>
                 </div>
                 <div>
                     <h3>Motor 3 (Front Left)</h3>
-                    <label>Offset: <input type="number" id="motor3_offset" value="-15" step="1" min="-50" max="50" onchange="updateMotorCal()"></label>
+                    <label>Offset: <input type="number" id="motor3_offset" value="0" step="1" min="-50" max="50" onchange="updateMotorCal()"></label>
                 </div>
                 <div>
                     <h3>Motor 4 (Back Left)</h3>
-                    <label>Offset: <input type="number" id="motor4_offset" value="-15" step="1" min="-50" max="50" onchange="updateMotorCal()"></label>
+                    <label>Offset: <input type="number" id="motor4_offset" value="0" step="1" min="-50" max="50" onchange="updateMotorCal()"></label>
                 </div>
             </div>
             <div style="text-align: center; margin-top: 15px;">
@@ -1352,6 +1674,28 @@ void setupWebServer()
                     <label>I: <input type="number" id="yaw_i" value="0.0" step="0.01" onchange="updatePID()"></label><br>
                     <label>D: <input type="number" id="yaw_d" value="0.05" step="0.01" onchange="updatePID()"></label><br>
                 </div>
+            </div>
+        </div>
+        
+        <!-- Flight Controller Debug Console -->
+        <div class="card">
+            <h2>Flight Controller Debug Console</h2>
+            <div style="background: #1e1e1e; color: #00ff00; padding: 15px; border-radius: 4px; font-family: 'Courier New', monospace; font-size: 14px; max-height: 600px; overflow-y: auto;" id="debugConsole">
+                <div style="color: #ffffff;">======== FLIGHT CONTROLLER DEBUG ========</div>
+                <div id="debugContent">
+                    <div style="color: #ffff00;">[Status]</div>
+                    <div>Mode: DISARMED | Armed: NO | Throttle: 0.00 (PWM: 1100)</div>
+                    <div>Roll: 0.0° | Pitch: 0.0° | Yaw: 0.0°/s | Alt: 0.0m | Batt: 0.0V</div>
+                    <br>
+                    <div style="color: #ffff00;">[System]</div>
+                    <div>Loop Freq: 100Hz | Sensors: OK | Emergency: NO</div>
+                    <div>Uptime: 0 ms | Free Heap: 0 bytes</div>
+                </div>
+                <div style="color: #ffffff; margin-top: 10px;">==========================================</div>
+            </div>
+            <div style="text-align: center; margin-top: 10px;">
+                <button class="btn-primary" onclick="toggleDebugConsole()">Toggle Auto-Update</button>
+                <button class="btn-primary" onclick="clearDebugConsole()">Clear Console</button>
             </div>
         </div>
     </div>
@@ -1532,6 +1876,102 @@ void setupWebServer()
             updateMotorCal();
             alert('Motor calibration saved!');
         }
+        
+        // Debug Console Functionality
+        let debugUpdateEnabled = true;
+        let debugUpdateInterval = null;
+        
+        // Start debug updates automatically
+        function startDebugUpdates() {
+            if (debugUpdateInterval) clearInterval(debugUpdateInterval);
+            debugUpdateInterval = setInterval(updateDebugConsole, 1000); // Update every 1 second
+        }
+        
+        function updateDebugConsole() {
+            if (!debugUpdateEnabled) return;
+            
+            fetch('/api/debug')
+                .then(response => response.json())
+                .then(data => {
+                    const content = document.getElementById('debugContent');
+                    let html = '';
+                    
+                    // [Status] Section
+                    html += '<div style="color: #ffff00;">[Status]</div>';
+                    html += `<div>Mode: ${data.status.mode} | Armed: ${data.status.armed ? 'YES' : 'NO'} | Throttle: ${data.status.throttle.toFixed(2)} (PWM: ${data.status.throttle_pwm})</div>`;
+                    html += `<div>Roll: ${data.status.roll.toFixed(1)}° | Pitch: ${data.status.pitch.toFixed(1)}° | Yaw: ${data.status.yaw_rate.toFixed(1)}°/s | Alt: ${data.status.altitude.toFixed(1)}m | Batt: ${data.status.battery.toFixed(1)}V</div>`;
+                    html += '<br>';
+                    
+                    // [PID Debug] Section - only if PID active
+                    if (data.pid.active) {
+                        html += '<div style="color: #ffff00;">[PID Debug]</div>';
+                        html += `<div>Roll: ${data.pid.roll_output >= 0 ? '+' : ''}${data.pid.roll_output.toFixed(1)} | Pitch: ${data.pid.pitch_output >= 0 ? '+' : ''}${data.pid.pitch_output.toFixed(1)} | Yaw: ${data.pid.yaw_output >= 0 ? '+' : ''}${data.pid.yaw_output.toFixed(1)}</div>`;
+                        html += `<div>Setpoints -> Roll: ${data.pid.roll_setpoint >= 0 ? '+' : ''}${data.pid.roll_setpoint.toFixed(1)}° | Pitch: ${data.pid.pitch_setpoint >= 0 ? '+' : ''}${data.pid.pitch_setpoint.toFixed(1)}° | Yaw: ${data.pid.yaw_setpoint >= 0 ? '+' : ''}${data.pid.yaw_setpoint.toFixed(1)}°/s</div>`;
+                        html += `<div>PID Status: ${data.pid.enabled_by_throttle ? '<span style="color: #00ff00;">ACTIVE</span>' : '<span style="color: #ff6600;">THROTTLE DEADBAND</span>'} (Min throttle: 15% for control)</div>`;
+                        html += '<br>';
+                    }
+                    
+                    // [Calibration] Section - show calibration offsets
+                    if (data.calibration && data.calibration.active) {
+                        html += '<div style="color: #ffff00;">[Calibration]</div>';
+                        html += `<div>IMU Level Offsets -> Roll: ${data.calibration.roll_offset >= 0 ? '+' : ''}${data.calibration.roll_offset.toFixed(2)}° | Pitch: ${data.calibration.pitch_offset >= 0 ? '+' : ''}${data.calibration.pitch_offset.toFixed(2)}°</div>`;
+                        html += '<div>Current angles are relative to these calibrated level positions</div>';
+                        html += '<br>';
+                    }
+                    
+                    // [Motor Mix] Section
+                    html += '<div style="color: #ffff00;">[Motor Mix]</div>';
+                    html += `<div>BasePWM: ${data.motors.base_pwm} -> Motors: [${data.motors.motor1}, ${data.motors.motor2}, ${data.motors.motor3}, ${data.motors.motor4}]</div>`;
+                    html += `<div>Calibration: [${data.motors.cal1 >= 0 ? '+' : ''}${data.motors.cal1.toFixed(0)}, ${data.motors.cal2 >= 0 ? '+' : ''}${data.motors.cal2.toFixed(0)}, ${data.motors.cal3 >= 0 ? '+' : ''}${data.motors.cal3.toFixed(0)}, ${data.motors.cal4 >= 0 ? '+' : ''}${data.motors.cal4.toFixed(0)}]</div>`;
+                    html += '<br>';
+                    
+                    // [Inputs] Section
+                    html += '<div style="color: #ffff00;">[Inputs]</div>';
+                    html += `<div>Throttle: ${data.inputs.throttle.toFixed(3)} | Roll: ${data.inputs.roll >= 0 ? '+' : ''}${data.inputs.roll.toFixed(2)} | Pitch: ${data.inputs.pitch >= 0 ? '+' : ''}${data.inputs.pitch.toFixed(2)} | Yaw: ${data.inputs.yaw >= 0 ? '+' : ''}${data.inputs.yaw.toFixed(2)}</div>`;
+                    html += '<br>';
+                    
+                    // [System] Section
+                    html += '<div style="color: #ffff00;">[System]</div>';
+                    html += `<div>Loop Freq: 100Hz | Sensors: ${data.system.sensors_ok ? 'OK' : 'FAIL'} | Emergency: ${data.system.emergency ? 'YES' : 'NO'}</div>`;
+                    html += `<div>IMU Calibrated: ${data.system.imu_calibrated ? 'YES' : 'NO'} | Uptime: ${data.system.uptime} ms | Free Heap: ${data.system.free_heap} bytes</div>`;
+                    
+                    content.innerHTML = html;
+                    
+                    // Auto-scroll to bottom if needed
+                    const console = document.getElementById('debugConsole');
+                    console.scrollTop = console.scrollHeight;
+                })
+                .catch(error => {
+                    console.log('Debug update error:', error);
+                    const content = document.getElementById('debugContent');
+                    content.innerHTML = '<div style="color: #ff0000;">Debug data unavailable - Check connection</div>';
+                });
+        }
+        
+        function toggleDebugConsole() {
+            debugUpdateEnabled = !debugUpdateEnabled;
+            const button = event.target;
+            if (debugUpdateEnabled) {
+                button.textContent = 'Pause Updates';
+                button.className = 'btn-danger';
+                startDebugUpdates();
+            } else {
+                button.textContent = 'Resume Updates';
+                button.className = 'btn-success';
+                if (debugUpdateInterval) {
+                    clearInterval(debugUpdateInterval);
+                    debugUpdateInterval = null;
+                }
+            }
+        }
+        
+        function clearDebugConsole() {
+            const content = document.getElementById('debugContent');
+            content.innerHTML = '<div style="color: #00ff00;">Debug console cleared - waiting for new data...</div>';
+        }
+        
+        // Start debug updates when page loads
+        startDebugUpdates();
     </script>
 </body>
 </html>
@@ -1688,6 +2128,66 @@ void setupWebServer()
         } else {
             server.send(400, "text/plain", "No data");
         } });
+
+    // API: Debug Data for Web Dashboard
+    server.on("/api/debug", HTTP_GET, []()
+              {
+        StaticJsonDocument<1024> doc;
+        
+        // Status Section
+        doc["status"]["mode"] = debugData.flight_mode;
+        doc["status"]["armed"] = debugData.armed;
+        doc["status"]["throttle"] = debugData.throttle_input;
+        doc["status"]["throttle_pwm"] = debugData.throttle_pwm;
+        doc["status"]["roll"] = debugData.roll_angle;
+        doc["status"]["pitch"] = debugData.pitch_angle;
+        doc["status"]["yaw_rate"] = debugData.yaw_rate;
+        doc["status"]["altitude"] = debugData.altitude;
+        doc["status"]["battery"] = debugData.battery_voltage;
+        
+        // PID Debug Section
+        doc["pid"]["active"] = debugData.pid_active;
+        doc["pid"]["enabled_by_throttle"] = debugData.pid_enabled_by_throttle;
+        doc["pid"]["roll_output"] = debugData.roll_output;
+        doc["pid"]["pitch_output"] = debugData.pitch_output;
+        doc["pid"]["yaw_output"] = debugData.yaw_output;
+        doc["pid"]["roll_setpoint"] = debugData.roll_setpoint;
+        doc["pid"]["pitch_setpoint"] = debugData.pitch_setpoint;
+        doc["pid"]["yaw_setpoint"] = debugData.yaw_setpoint;
+        
+        // Calibration Debug Section
+        doc["calibration"]["active"] = debugData.imu_cal_active;
+        doc["calibration"]["roll_offset"] = debugData.roll_cal_offset;
+        doc["calibration"]["pitch_offset"] = debugData.pitch_cal_offset;
+        
+        // Motor Mix Section
+        doc["motors"]["base_pwm"] = debugData.base_pwm;
+        doc["motors"]["motor1"] = debugData.motor1_final;
+        doc["motors"]["motor2"] = debugData.motor2_final;
+        doc["motors"]["motor3"] = debugData.motor3_final;
+        doc["motors"]["motor4"] = debugData.motor4_final;
+        doc["motors"]["cal1"] = debugData.motor1_offset;
+        doc["motors"]["cal2"] = debugData.motor2_offset;
+        doc["motors"]["cal3"] = debugData.motor3_offset;
+        doc["motors"]["cal4"] = debugData.motor4_offset;
+        
+        // Inputs Section
+        doc["inputs"]["throttle"] = debugData.throttle_input;
+        doc["inputs"]["roll"] = debugData.roll_input;
+        doc["inputs"]["pitch"] = debugData.pitch_input;
+        doc["inputs"]["yaw"] = debugData.yaw_input;
+        
+        // System Section
+        doc["system"]["sensors_ok"] = debugData.sensors_ok;
+        doc["system"]["emergency"] = debugData.emergency_active;
+        doc["system"]["imu_calibrated"] = debugData.imu_calibrated;
+        doc["system"]["uptime"] = debugData.uptime;
+        doc["system"]["free_heap"] = debugData.free_heap;
+        doc["system"]["timestamp"] = debugData.timestamp;
+        
+        String response;
+        serializeJson(doc, response);
+        server.send(200, "application/json", response); });
 
     server.begin();
     Serial.println("Web server started - Flight Controller Dashboard ready");

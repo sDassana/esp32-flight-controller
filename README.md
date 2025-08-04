@@ -79,44 +79,7 @@ This value is used as the baseline in altitude PID and mapped to joystick neutra
 
 The drone uses an **NRF24L01+ PA+LNA** module for long-range wireless communication with a ground remote. To ensure reliable, collision-free communication, the remote initiates all communication, and the drone replies with telemetry using the **ACK payload feature** of the NRF24L01.
 
----
-
-### 🔁 Acknowledgment Payload Design (Round-Robin Telemetry)
-
-Each time the remote sends a command, the drone responds with an **ACK payload** that includes:
-
-- ✅ **Altitude** — from BME280 (or BMP280)
-- ✅ **GPS coordinates** — from NEO-6M GPS
-- 🔄 **One additional sensor reading**, chosen in a round-robin fashion
-
-This approach enables the drone to share a rich set of telemetry data without exceeding the **32-byte payload limit** of the NRF24L01 module.
-
-#### 🔄 Round-Robin Sensor Rotation:
-
-1. **BME280** (temperature and humidity data)
-2. **Light sensors** (UV from GUVA-S12SD and lux from BH1750)
-3. **Air quality sensors** (TVOC and eCO2 from CCS811 or ENS160)
-
----
-
-### 📦 ACK Payload Structure
-
-````cpp
-struct AckPayload {
-  float altitude;       // in meters
-  float latitude;       // decimal degrees
-  float longitude;      // decimal degrees
-
-  uint8_t sensorType;   // 0 = MPU6050, 1 = UV/Light, 2 = Air Quality
-
-  union {
-    struct { float ax, ay, az; float gx, gy, gz; } mpu;
-    struct { float uv, lux; } light;
-    struct { float tvoc, co2; } air;
-  } data;
-};
-
-##Power
+## Power
 
 - All components powered via filtered power supply (5V and 3.3V regulated lines)
 - NRF24L01 is powered via a dedicated filtered 3.3V module (NOT from ESP32)
@@ -148,19 +111,19 @@ This firmware powers a custom-built drone using an ESP32 (NodeMCU ESP-WROOM-32).
 
 ## 🚁 Components Overview
 
-| Component       | Purpose                               |
-| --------------- | ------------------------------------- |
-| ESP32           | Main flight controller + WiFi         |
-| MPU6050         | Roll, pitch, yaw (IMU)                |
-| BME280          | Barometric altitude + temperature + humidity    |
-| VL53L0X ×4      | Obstacle detection (via PCA9548A mux) |
-| ENS160 + AHT21  | CO₂, TVOC, temp, humidity             |
-| BH1750 + GUVA   | Light + UV intensity                  |
-| GPS NEO-6M      | Position and velocity                 |
-| NRF24L01+       | RF telemetry and remote control       |
-| ESCs + Motors   | Propulsion (EMAX 980KV motors)        |
-| RGB LEDs        | Navigation + status indicators        |
-| Buzzer          | Status sound                          |
+| Component      | Purpose                                      |
+| -------------- | -------------------------------------------- |
+| ESP32          | Main flight controller + WiFi                |
+| MPU6050        | Roll, pitch, yaw (IMU)                       |
+| BME280         | Barometric altitude + temperature + humidity |
+| VL53L0X ×4     | Obstacle detection (via PCA9548A mux)        |
+| ENS160 + AHT21 | CO₂, TVOC, temp, humidity                    |
+| BH1750 + GUVA  | Light + UV intensity                         |
+| GPS NEO-6M     | Position and velocity                        |
+| NRF24L01+      | RF telemetry and remote control              |
+| ESCs + Motors  | Propulsion (EMAX 980KV motors)               |
+| RGB LEDs       | Navigation + status indicators               |
+| Buzzer         | Status sound                                 |
 
 ---
 
@@ -206,7 +169,7 @@ The divider is made using standard 10kΩ resistors:
 
 **Divider ratio:**
 \[
-V_{out} = V_{in} \times \frac{7.5}{37.5} = V_{in} \times 0.2
+V*{out} = V*{in} \times \frac{7.5}{37.5} = V\_{in} \times 0.2
 \]
 
 This scales the full 3S LiPo range (up to 12.6V) down to ~2.52V, which is safe for the ESP32 ADC input.
@@ -226,14 +189,25 @@ float vIn = vOut * 5.0;
 
 - 2 Joy Stick modules
 - Joystick module 1
-  -X - GPIO 33
-  -y - GPIO 25
-  -BTN - GPIO 26
-
-- Joystick module 2
   -X - GPIO 34
   -y - GPIO 35
   -BTN - GPIO 32
+
+- Joystick module 2
+  -X - GPIO 36
+  -y - GPIO 39
+  -BTN - GPIO 33 (Not functioning well)
+
+- Toggle Switches
+- Toggle switch 1
+  -pin1 - GPIO 27
+  -pin2 - GND
+  -pin3 - none
+
+- Toggle switch 2
+  -pin1 - GPIO 14
+  -pin2 - GND
+  -pin3 - none
 
 - Communication Module: NRF24L01 + PA + LNA (via SPI)
 - channel 76 to avoid wifi interference
@@ -243,4 +217,8 @@ float vIn = vOut * 5.0;
   - SCK: GPIO 18
   - MOSI: GPIO 23
   - MISO: GPIO 19
-````
+
+- Display (I2C)
+  - SDA: GPIO 21
+  - SCL: GPIO 22
+```
