@@ -11,6 +11,7 @@
 
 - [Overview](#overview)
 - [Features](#features)
+- [Project Structure](#project-structure)
 - [Hardware Specifications](#hardware-specifications)
 - [Pin Configuration](#pin-configuration)
 - [Communication Protocols](#communication-protocols)
@@ -23,6 +24,45 @@
 ## 🔍 Overview
 
 This project implements a sophisticated flight controller for a custom quadcopter using the ESP32 microcontroller. The system features advanced sensor fusion, RF remote control, comprehensive telemetry, and FreeRTOS-based multi-threading architecture for real-time flight control operations.
+
+## 📁 Project Structure
+
+```
+esp32-flight-controller/
+├── 📁 firmware/              # Main firmware files
+│   ├── 📁 drone/             # Drone flight controller firmware
+│   │   └── droneFreeRTOS.ino # Current production firmware
+│   └── 📁 remote/            # Remote controller firmware
+│       ├── remoteControllerStable.ino  # Stable remote controller
+│       └── FastControlRemote.ino       # Alternative remote
+│
+├── 📁 docs/                  # Project documentation
+│   ├── PROJECT_PROGRESS.md   # Development progress tracking
+│   └── PIDControl.md         # PID control documentation
+│
+├── 📁 examples/              # Test programs and examples
+│   ├── 📁 sensor_tests/      # Individual sensor test programs
+│   │   ├── BMP280.cpp        # Environmental sensor testing
+│   │   ├── MPU6050.cpp       # IMU sensor testing
+│   │   ├── gps_test.cpp      # GPS module testing
+│   │   └── ...
+│   └── 📁 component_tests/   # System component testing
+│       ├── motor_test.cpp    # ESC/motor testing
+│       └── Wifi Control.cpp  # WiFi testing
+│
+├── 📁 tools/                 # Development utilities
+│   └── web_dashboard.cpp     # Web-based control interface
+│
+├── 📁 hardware/              # Hardware specs and diagrams (planned)
+│
+├── 📁 archive/               # Legacy versions and deprecated code
+│   └── 📁 legacy_versions/   # Previous firmware implementations
+│
+├── 📁 lib/                   # Project-specific libraries
+├── 📁 include/               # Header files
+├── 📁 src/                   # Source files (main.cpp)
+└── platformio.ini            # Build configuration
+```
 
 ## ✨ Features
 
@@ -288,13 +328,29 @@ float batteryVoltage = vOut * 5.0;         // Scale back to actual voltage
 # Clone the repository
 git clone https://github.com/yourusername/esp32-flight-controller.git
 
-# Open in PlatformIO
+# Navigate to project directory
 cd esp32-flight-controller
-pio run
 
-# Upload to ESP32
+# For drone firmware
+cd firmware/drone
+# Upload droneFreeRTOS.ino using PlatformIO or Arduino IDE
+
+# For remote controller firmware
+cd ../remote
+# Upload remoteControllerStable.ino using PlatformIO or Arduino IDE
+
+# Return to project root for PlatformIO builds
+cd ../../
 pio run --target upload
 ```
+
+### Quick Start Guide
+
+1. **Hardware Assembly** - Follow pin configuration tables for wiring
+2. **Firmware Upload** - Install drone and remote firmware from `firmware/` directory
+3. **Component Testing** - Use examples in `examples/` for individual component verification
+4. **System Integration** - Test complete system using tools in `tools/` directory
+5. **Documentation** - Refer to `docs/` for detailed progress and technical information
 
 ## 🚀 Usage
 
@@ -343,7 +399,16 @@ pio run --target upload
 - Advanced telemetry dashboard
 - Mobile app integration
 
-For detailed progress tracking, see [PROJECT_PROGRESS.md](PROJECT_PROGRESS.md).
+For detailed progress tracking, see [docs/PROJECT_PROGRESS.md](docs/PROJECT_PROGRESS.md).
+
+## 🗂️ Directory Navigation
+
+- **🚁 [firmware/](firmware/)** - Current production firmware for drone and remote
+- **📚 [docs/](docs/)** - Complete project documentation and progress tracking
+- **🔬 [examples/](examples/)** - Sensor tests and component verification programs
+- **🛠️ [tools/](tools/)** - Development utilities and web dashboard
+- **🔌 [hardware/](hardware/)** - Hardware specifications and diagrams (planned)
+- **📦 [archive/](archive/)** - Legacy versions and deprecated implementations
 
 ## 🤝 Contributing
 
