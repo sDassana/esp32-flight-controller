@@ -6,7 +6,8 @@
  * The drone receives control commands and responds with sensor data in the ACK payload.
  */
 
-#include <Arduino.h>
+// Testing SimpleTelemetryDrone.ino
+#include "../SimpleTelemetryDrone.ino"
 #include <SPI.h>
 #include <RF24.h>
 #include <Wire.h>

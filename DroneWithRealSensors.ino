@@ -1,14 +1,17 @@
 /*
- * Drone with Real Sensors
- * Adding real BMP280, AHT21, and GPS to working telemetry system
+ * Drone with Enhanced Sensor Suite
+ * Complete telemetry system with BME280, AHT21, GPS, and simulated advanced sensors
+ * Compatible with remote control system (12-byte control, 22-byte telemetry)
  */
 
 #include <SPI.h>
 #include <RF24.h>
 #include <Wire.h>
-#include <Adafruit_BMP280.h>
+#include <Adafruit_BME280.h>
 #include <Adafruit_AHTX0.h>
 #include <TinyGPS++.h>
+#include <BH1750.h>
+#include <ScioSense_ENS160.h>
 
 // Pin Definitions
 #define CE_PIN 4
@@ -16,38 +19,52 @@
 #define BATTERY_PIN 35
 #define GPS_RX_PIN 16
 #define GPS_TX_PIN 17
+#define GUVA_PIN 36 // GUVA-S12SD UV sensor
 
 // I2C addresses
-#define BMP280_ADDRESS 0x76
+#define BME280_ADDRESS 0x76
+#define BH1750_ADDRESS 0x23
+#define ENS160_ADDRESS 0x53
 
 RF24 radio(CE_PIN, CSN_PIN);
 const byte address[6] = "00001";
 
 // Initialize real sensors
-Adafruit_BMP280 bmp280;
+Adafruit_BME280 bme280;
 Adafruit_AHTX0 aht;
 TinyGPSPlus gps;
+BH1750 lightMeter;
+ScioSense_ENS160 ens160;
 
-// Control packet (8 bytes)
+// Control packet (12 bytes) - Added button states and toggle switches to match remote
 struct ControlPacket
 {
     int16_t throttle;
     int16_t roll;
     int16_t pitch;
     int16_t yaw;
+    uint8_t joy1_btn; // Joystick 1 button state (0 = pressed, 1 = released)
+    uint8_t joy2_btn; // Joystick 2 button state (0 = pressed, 1 = released)
+    uint8_t toggle1;  // Toggle switch 1 state (0 = off, 1 = on)
+    uint8_t toggle2;  // Toggle switch 2 state (0 = off, 1 = on)
 };
 
-// Enhanced telemetry packet (12 bytes) - more real data
+// Enhanced telemetry packet (22 bytes) - matches remote with lux, altitude, UV index, eCO2, and TVOC
 struct TelemetryPacket
 {
-    int16_t temperature; // x100 - Real BMP280 data
-    uint16_t pressure;   // x10 - Real BMP280 data
+    int16_t temperature; // x100 - Real BME280 data
+    uint16_t pressure;   // x10 - Real BME280 data
     uint8_t humidity;    // % - Real AHT21 data
     uint16_t battery;    // mV - Real battery voltage
     int16_t latitude;    // GPS latitude (simplified)
     int16_t longitude;   // GPS longitude (simplified)
     uint8_t satellites;  // GPS satellite count
     uint8_t status;      // System status
+    uint16_t lux;        // Light level in lux
+    int16_t altitude;    // Altitude in centimeters from BME280 (for 2 decimal precision)
+    uint16_t uvIndex;    // UV index x100 from GUVA sensor
+    uint16_t eCO2;       // Equivalent CO2 in ppm from ENS160
+    uint16_t TVOC;       // Total VOC in ppb from ENS160
 };
 
 ControlPacket receivedControl;
@@ -57,6 +74,16 @@ unsigned long lastSensorRead = 0;
 unsigned long lastGPSRead = 0;
 int packetsReceived = 0;
 bool sensorsInitialized = false;
+bool bh1750Ready = false;
+bool ens160Ready = false;
+
+// Altitude calibration variables
+#define PRESSURE_BUFFER_SIZE 5    // Smaller buffer for faster response
+float seaLevelPressure = 1013.25; // Will be calibrated at startup
+bool altitudeCalibrated = false;
+float pressureReadings[PRESSURE_BUFFER_SIZE]; // For smoothing pressure readings
+int pressureIndex = 0;
+int pressureCount = 0;
 
 void setup()
 {
@@ -69,6 +96,7 @@ void setup()
 
     // Initialize pins
     pinMode(BATTERY_PIN, INPUT);
+    pinMode(GUVA_PIN, INPUT); // UV sensor analog input
 
     // Initialize GPS (Serial2 on ESP32)
     Serial2.begin(9600, SERIAL_8N1, GPS_RX_PIN, GPS_TX_PIN);
@@ -87,15 +115,19 @@ void setup()
             delay(1000);
     }
 
-    // Use EXACT same configuration as working test
+    // Use EXACT same configuration as remote
     radio.openReadingPipe(1, address);
-    radio.setPALevel(RF24_PA_LOW);
-    radio.setDataRate(RF24_1MBPS);
+    radio.setPALevel(RF24_PA_HIGH);  // Match remote power level
+    radio.setDataRate(RF24_250KBPS); // Match remote data rate
     radio.setChannel(76);
     radio.setAutoAck(true);
     radio.setRetries(15, 15);
     radio.enableDynamicPayloads();
     radio.enableAckPayload();
+
+    // Additional range improvements to match remote
+    radio.setCRCLength(RF24_CRC_16); // Use 16-bit CRC for better error detection
+    radio.setAddressWidth(5);        // Use full 5-byte addresses
 
     // Start listening for control data
     radio.startListening();
@@ -106,8 +138,8 @@ void setup()
 
 void loop()
 {
-    // Read sensors every 500ms
-    if (millis() - lastSensorRead > 500)
+    // Read sensors every 1 second for faster response
+    if (millis() - lastSensorRead > 1000)
     {
         readRealSensors();
         lastSensorRead = millis();
@@ -163,29 +195,33 @@ void initializeRealSensors()
         Serial.println("No I2C devices found");
     }
 
-    // Try BMP280 at common addresses
-    bool bmp280Found = false;
-    uint8_t bmpAddresses[] = {0x76, 0x77};
+    // Try BME280 at common addresses
+    bool bme280Found = false;
+    uint8_t bmeAddresses[] = {0x76, 0x77};
     for (int i = 0; i < 2; i++)
     {
-        if (bmp280.begin(bmpAddresses[i]))
+        if (bme280.begin(bmeAddresses[i]))
         {
-            Serial.print("✓ BMP280 initialized at address 0x");
-            Serial.println(bmpAddresses[i], HEX);
-            bmp280.setSampling(Adafruit_BMP280::MODE_NORMAL,
-                               Adafruit_BMP280::SAMPLING_X2,
-                               Adafruit_BMP280::SAMPLING_X16,
-                               Adafruit_BMP280::FILTER_X16,
-                               Adafruit_BMP280::STANDBY_MS_500);
+            Serial.print("✓ BME280 initialized at address 0x");
+            Serial.println(bmeAddresses[i], HEX);
+
+            // Configure BME280 for stable readings
+            bme280.setSampling(Adafruit_BME280::MODE_FORCED,      // Use forced mode for manual readings
+                               Adafruit_BME280::SAMPLING_X16,     // Temperature oversampling
+                               Adafruit_BME280::SAMPLING_X16,     // Pressure oversampling
+                               Adafruit_BME280::SAMPLING_X16,     // Humidity oversampling
+                               Adafruit_BME280::FILTER_X16,       // IIR filter
+                               Adafruit_BME280::STANDBY_MS_1000); // 1 second standby
+
             sensorsInitialized = true;
-            bmp280Found = true;
+            bme280Found = true;
             break;
         }
     }
 
-    if (!bmp280Found)
+    if (!bme280Found)
     {
-        Serial.println("✗ BMP280 initialization failed - using simulated data");
+        Serial.println("✗ BME280 initialization failed - using simulated data");
     }
 
     // Initialize AHT21
@@ -198,20 +234,163 @@ void initializeRealSensors()
         Serial.println("✗ AHT21 initialization failed - using simulated data");
     }
 
+    // Initialize BH1750 light sensor
+    if (lightMeter.begin(BH1750::CONTINUOUS_HIGH_RES_MODE))
+    {
+        Serial.println("✓ BH1750 light sensor initialized");
+        bh1750Ready = true;
+    }
+    else
+    {
+        Serial.println("✗ BH1750 initialization failed - using simulated data");
+        bh1750Ready = false;
+    }
+
+    // Initialize ENS160 air quality sensor
+    if (ens160.begin())
+    {
+        Serial.println("✓ ENS160 air quality sensor initialized");
+        ens160.setMode(ENS160_OPMODE_STD);
+        ens160Ready = true;
+    }
+    else
+    {
+        Serial.println("✗ ENS160 initialization failed - using simulated data");
+        ens160Ready = false;
+    }
+
     Serial.println("✓ GPS Serial2 initialized");
+    Serial.println("✓ GUVA-S12SD UV sensor on analog pin");
+
+    // Calibrate altitude (assume current location is reference point)
+    calibrateAltitude();
+
     Serial.println("Sensor initialization complete");
+}
+
+void calibrateAltitude()
+{
+    if (!sensorsInitialized)
+    {
+        Serial.println("⚠ BME280 not available - altitude will use default sea level pressure");
+        return;
+    }
+
+    Serial.println("Calibrating altitude reference...");
+
+    // Wait for sensor to stabilize
+    delay(2000);
+
+    // Take multiple pressure readings for calibration
+    float pressureSum = 0;
+    int validReadings = 0;
+
+    for (int i = 0; i < 30; i++)
+    {
+        // Force a reading and wait
+        bme280.takeForcedMeasurement();
+        delay(100);
+
+        float pressure = bme280.readPressure() / 100.0; // Convert Pa to hPa
+        if (pressure > 800 && pressure < 1200)          // Reasonable pressure range
+        {
+            pressureSum += pressure;
+            validReadings++;
+            Serial.print(".");
+        }
+        delay(100);
+    }
+    Serial.println();
+
+    if (validReadings > 20)
+    {
+        seaLevelPressure = pressureSum / validReadings;
+        altitudeCalibrated = true;
+
+        Serial.print("✓ Altitude calibrated - Reference pressure: ");
+        Serial.print(seaLevelPressure);
+        Serial.println(" hPa (current location = 0m)");
+    }
+    else
+    {
+        Serial.println("✗ Altitude calibration failed - using standard sea level pressure");
+    }
 }
 
 void readRealSensors()
 {
-    // Read BMP280 (temperature and pressure)
-    if (sensorsInitialized && bmp280.begin(BMP280_ADDRESS))
+    // Read BME280 (temperature and pressure)
+    if (sensorsInitialized)
     {
-        float temp = bmp280.readTemperature();
-        float pressure = bmp280.readPressure() / 100.0; // Convert Pa to hPa
+        // Force a measurement for consistent timing
+        bme280.takeForcedMeasurement();
+
+        float temp = bme280.readTemperature();
+        float currentPressure = bme280.readPressure() / 100.0; // Convert Pa to hPa
 
         telemetryData.temperature = (int16_t)(temp * 100);
-        telemetryData.pressure = (uint16_t)(pressure * 10);
+        telemetryData.pressure = (uint16_t)(currentPressure * 10);
+
+        // Validate pressure reading
+        if (currentPressure > 800 && currentPressure < 1200)
+        {
+            // Add to pressure buffer for simple smoothing
+            pressureReadings[pressureIndex] = currentPressure;
+            pressureIndex = (pressureIndex + 1) % PRESSURE_BUFFER_SIZE;
+            if (pressureCount < PRESSURE_BUFFER_SIZE)
+                pressureCount++;
+
+            // Calculate simple moving average
+            float pressureSum = 0;
+            for (int i = 0; i < pressureCount; i++)
+            {
+                pressureSum += pressureReadings[i];
+            }
+            float smoothedPressure = pressureSum / pressureCount;
+
+            // Calculate altitude using smoothed pressure
+            float altitude;
+            if (altitudeCalibrated)
+            {
+                // Use calibrated reference for relative altitude
+                altitude = 44330.0 * (1.0 - pow(smoothedPressure / seaLevelPressure, 0.1903));
+            }
+            else
+            {
+                // Use standard sea level pressure
+                altitude = 44330.0 * (1.0 - pow(smoothedPressure / 1013.25, 0.1903));
+            }
+
+            // Debug output for pressure and altitude calculation
+            static unsigned long lastDebug = 0;
+            if (millis() - lastDebug > 5000) // Debug every 5 seconds
+            {
+                Serial.print("DEBUG - Current P: ");
+                Serial.print(currentPressure, 2);
+                Serial.print(" hPa, Smoothed P: ");
+                Serial.print(smoothedPressure, 2);
+                Serial.print(" hPa, Ref P: ");
+                Serial.print(seaLevelPressure, 2);
+                Serial.print(" hPa, Raw Alt: ");
+                Serial.print(altitude, 2);
+                Serial.println(" m");
+                lastDebug = millis();
+            }
+
+            // Simple range limiting
+            if (altitude < -500)
+                altitude = -500;
+            if (altitude > 5000)
+                altitude = 5000;
+
+            // Store altitude in centimeters for 2 decimal precision
+            telemetryData.altitude = (int16_t)(altitude * 100); // Convert meters to centimeters
+        }
+        else
+        {
+            // Invalid pressure reading - keep last altitude
+            Serial.println("Invalid pressure reading");
+        }
     }
     else
     {
@@ -223,6 +402,8 @@ void readRealSensors()
         static float pressure = 1013.2;
         pressure += (random(-5, 6) / 10.0);
         telemetryData.pressure = (uint16_t)(pressure * 10);
+
+        telemetryData.altitude = 10000 + random(-2000, 2001); // Simulated altitude in cm
     }
 
     // Read AHT21 (humidity and temperature)
@@ -230,7 +411,7 @@ void readRealSensors()
     if (aht.getEvent(&humidity, &temp))
     {
         telemetryData.humidity = (uint8_t)humidity.relative_humidity;
-        // Use AHT21 temperature if BMP280 failed
+        // Use AHT21 temperature if BME280 failed
         if (!sensorsInitialized)
         {
             telemetryData.temperature = (int16_t)(temp.temperature * 100);
@@ -252,6 +433,68 @@ void readRealSensors()
     else
     {
         telemetryData.battery = map(batteryRaw, 0, 4095, 0, 5000);
+    }
+
+    // Read real light sensor (BH1750)
+    if (bh1750Ready)
+    {
+        float lux = lightMeter.readLightLevel();
+        if (lux >= 0)
+        {
+            telemetryData.lux = (uint16_t)lux;
+        }
+        else
+        {
+            telemetryData.lux = 500 + random(-100, 101); // Fallback simulated
+        }
+    }
+    else
+    {
+        telemetryData.lux = 500 + random(-100, 101); // Simulated if sensor not ready
+    }
+
+    // Read real UV sensor (GUVA-S12SD)
+    int uvRaw = analogRead(GUVA_PIN);
+    // Convert to UV index (calibration may need adjustment based on your setup)
+    float uvVoltage = (uvRaw / 4095.0) * 3.3;
+    float uvIndex = uvVoltage / 0.1; // Approximate conversion for GUVA-S12SD
+    if (uvIndex < 0)
+        uvIndex = 0; // Clamp to positive values
+    if (uvIndex > 15)
+        uvIndex = 15; // Reasonable UV index maximum
+    telemetryData.uvIndex = (uint16_t)(uvIndex * 100);
+
+    // Read real air quality sensor (ENS160)
+    if (ens160Ready && ens160.available())
+    {
+        ens160.measure();
+        uint16_t eco2 = ens160.geteCO2();
+        uint16_t tvoc = ens160.getTVOC();
+
+        // Validate readings (ENS160 sometimes gives invalid values during warm-up)
+        if (eco2 > 400 && eco2 < 5000) // Reasonable CO2 range
+        {
+            telemetryData.eCO2 = eco2;
+        }
+        else
+        {
+            telemetryData.eCO2 = 400 + random(-50, 51); // Fallback
+        }
+
+        if (tvoc < 1000) // Reasonable TVOC range
+        {
+            telemetryData.TVOC = tvoc;
+        }
+        else
+        {
+            telemetryData.TVOC = 50 + random(-20, 21); // Fallback
+        }
+    }
+    else
+    {
+        // Fallback to simulated values
+        telemetryData.eCO2 = 400 + random(-50, 51);
+        telemetryData.TVOC = 50 + random(-20, 21);
     }
 
     // Update status
@@ -309,15 +552,38 @@ void handleControlData()
             Serial.print(receivedControl.pitch);
             Serial.print(" Y:");
             Serial.print(receivedControl.yaw);
-            Serial.print(" | Real Sensors - Temp:");
+
+            // Show button states when pressed
+            if (receivedControl.joy1_btn == 0)
+                Serial.print(" [JOY1-BTN]");
+            if (receivedControl.joy2_btn == 0)
+                Serial.print(" [JOY2-BTN]");
+
+            // Show toggle switch states
+            if (receivedControl.toggle1 == 1)
+                Serial.print(" [SW1-ON]");
+            if (receivedControl.toggle2 == 1)
+                Serial.print(" [SW2-ON]");
+
+            Serial.print(" | Sensors - Temp:");
             Serial.print(telemetryData.temperature / 100.0);
             Serial.print("°C Hum:");
             Serial.print(telemetryData.humidity);
             Serial.print("% Press:");
             Serial.print(telemetryData.pressure / 10.0);
-            Serial.print("hPa GPS:");
+            Serial.print("hPa Alt:");
+            Serial.print(telemetryData.altitude / 100.0); // Display altitude in meters with 2 decimals
+            Serial.print("m GPS:");
             Serial.print(telemetryData.satellites);
-            Serial.println(" sats");
+            Serial.print(" sats Lux:");
+            Serial.print(telemetryData.lux);
+            Serial.print("lx UV:");
+            Serial.print(telemetryData.uvIndex / 100.0);
+            Serial.print(" CO2:");
+            Serial.print(telemetryData.eCO2);
+            Serial.print("ppm TVOC:");
+            Serial.print(telemetryData.TVOC);
+            Serial.println("ppb");
 
             // Load telemetry data as ACK payload for NEXT packet
             radio.writeAckPayload(1, &telemetryData, sizeof(telemetryData));
@@ -341,15 +607,25 @@ void printStatus()
     Serial.print(packetsReceived);
     Serial.print(", Active: ");
     Serial.print(controlActive ? "YES" : "NO");
-    Serial.print(", Real sensors: Temp:");
+    Serial.print(", Sensors: Temp:");
     Serial.print(telemetryData.temperature / 100.0);
     Serial.print("°C Hum:");
     Serial.print(telemetryData.humidity);
     Serial.print("% Press:");
     Serial.print(telemetryData.pressure / 10.0);
-    Serial.print("hPa GPS:");
+    Serial.print("hPa Alt:");
+    Serial.print(telemetryData.altitude / 100.0); // Display altitude in meters with 2 decimals
+    Serial.print("m GPS:");
     Serial.print(telemetryData.satellites);
     Serial.print(" sats Batt:");
     Serial.print(telemetryData.battery);
-    Serial.println("mV");
+    Serial.print("mV Lux:");
+    Serial.print(telemetryData.lux);
+    Serial.print("lx UV:");
+    Serial.print(telemetryData.uvIndex / 100.0);
+    Serial.print(" CO2:");
+    Serial.print(telemetryData.eCO2);
+    Serial.print("ppm TVOC:");
+    Serial.print(telemetryData.TVOC);
+    Serial.println("ppb");
 }

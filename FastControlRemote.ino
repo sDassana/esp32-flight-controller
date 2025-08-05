@@ -1,6 +1,6 @@
 /*
- * Complete Remote Controller - Fast Control
- * Increasing control frequency to 200ms (5Hz)
+ * Complete Remote Controller - Proven Control
+ * Reliable control at 200ms intervals (5Hz) for stable drone communication
  */
 
 #include <SPI.h>
@@ -14,15 +14,26 @@
 #define WIFI_SSID "Dialog 4G"
 #define WIFI_PASSWORD "0N7NT00ANTQ"
 
+// Upload frequency configuration (in milliseconds)
+#define FIREBASE_UPLOAD_INTERVAL 1000 // 10 seconds (change this value for testing)
+// Common testing intervals:
+// 2000   = 2 seconds (fast testing)
+// 5000   = 5 seconds (medium testing)
+// 10000  = 10 seconds (normal)
+// 30000  = 30 seconds (slow/production)
+// 60000  = 1 minute (very slow)
+
 // Pin Definitions
 #define CE_PIN 4
 #define CSN_PIN 5
 
-// Joystick pins
-#define JOY1_X_PIN 34
-#define JOY1_Y_PIN 35
-#define JOY2_X_PIN 36
-#define JOY2_Y_PIN 39
+// Joystick pins - Updated configuration
+#define JOY1_X_PIN 39   // Joystick 1 X-axis
+#define JOY1_Y_PIN 36   // Joystick 1 Y-axis
+#define JOY1_BTN_PIN 33 // Joystick 1 Button (Note: Not functioning well)
+#define JOY2_X_PIN 34   // Joystick 2 X-axis
+#define JOY2_Y_PIN 35   // Joystick 2 Y-axis
+#define JOY2_BTN_PIN 32 // Joystick 2 Button
 #define TOGGLE_SW1_PIN 27
 #define TOGGLE_SW2_PIN 14
 
@@ -34,26 +45,35 @@ FirebaseData firebaseData;
 FirebaseAuth auth;
 FirebaseConfig config;
 
-// Control packet (8 bytes)
+// Control packet (12 bytes) - Added button states and toggle switches
 struct ControlPacket
 {
     int16_t throttle;
     int16_t roll;
     int16_t pitch;
     int16_t yaw;
+    uint8_t joy1_btn; // Joystick 1 button state (0 = pressed, 1 = released)
+    uint8_t joy2_btn; // Joystick 2 button state (0 = pressed, 1 = released)
+    uint8_t toggle1;  // Toggle switch 1 state (0 = off, 1 = on)
+    uint8_t toggle2;  // Toggle switch 2 state (0 = off, 1 = on)
 };
 
-// Enhanced telemetry packet (12 bytes) - matches drone
+// Enhanced telemetry packet (22 bytes) - matches drone with lux, altitude, UV index, eCO2, and TVOC
 struct TelemetryPacket
 {
-    int16_t temperature; // x100 - Real BMP280 data
-    uint16_t pressure;   // x10 - Real BMP280 data
-    uint8_t humidity;    // % - Real AHT21 data
+    int16_t temperature; // x100 - Real BME280 data
+    uint16_t pressure;   // x10 - Real BME280 data
+    uint8_t humidity;    // % - Real BME280 data
     uint16_t battery;    // mV - Real battery voltage
     int16_t latitude;    // GPS latitude (simplified)
     int16_t longitude;   // GPS longitude (simplified)
     uint8_t satellites;  // GPS satellite count
     uint8_t status;      // System status
+    uint16_t lux;        // Light level in lux
+    int16_t altitude;    // Altitude in centimeters from BME280 (for 2 decimal precision)
+    uint16_t uvIndex;    // UV index x100 from GUVA sensor
+    uint16_t eCO2;       // Equivalent CO2 in ppm from ENS160
+    uint16_t TVOC;       // Total VOC in ppb from ENS160
 };
 
 ControlPacket controlData;
@@ -71,8 +91,10 @@ void setup()
     // Initialize pins
     pinMode(JOY1_X_PIN, INPUT);
     pinMode(JOY1_Y_PIN, INPUT);
+    pinMode(JOY1_BTN_PIN, INPUT_PULLUP); // Joystick 1 button (not functioning well)
     pinMode(JOY2_X_PIN, INPUT);
     pinMode(JOY2_Y_PIN, INPUT);
+    pinMode(JOY2_BTN_PIN, INPUT_PULLUP); // Joystick 2 button
     pinMode(TOGGLE_SW1_PIN, INPUT_PULLUP);
     pinMode(TOGGLE_SW2_PIN, INPUT_PULLUP);
 
@@ -88,13 +110,17 @@ void setup()
     }
 
     radio.openWritingPipe(address);
-    radio.setPALevel(RF24_PA_LOW);
-    radio.setDataRate(RF24_1MBPS);
+    radio.setPALevel(RF24_PA_HIGH);  // Increased from PA_LOW to PA_HIGH for better range
+    radio.setDataRate(RF24_250KBPS); // Reduced from 1MBPS to 250KBPS for better range
     radio.setChannel(76);
     radio.setAutoAck(true);
-    radio.setRetries(15, 15);
+    radio.setRetries(15, 15); // Maximum retries for reliability - PROVEN working configuration
     radio.enableDynamicPayloads();
     radio.enableAckPayload();
+
+    // Additional range improvements
+    radio.setCRCLength(RF24_CRC_16); // Use 16-bit CRC for better error detection
+    radio.setAddressWidth(5);        // Use full 5-byte addresses
 
     radio.stopListening();
 
@@ -104,12 +130,60 @@ void setup()
     initializeWiFi();
     initializeFirebase();
 
-    Serial.println("Starting FAST control transmission (5Hz) with telemetry and cloud upload...");
+    Serial.print("Starting PROVEN control transmission (5Hz) with telemetry and cloud upload every ");
+    Serial.print(FIREBASE_UPLOAD_INTERVAL / 1000);
+    Serial.println(" seconds...");
+
+    // Print radio configuration for debugging
+    Serial.println("Radio Configuration:");
+    Serial.print("  Power Level: RF24_PA_HIGH");
+    Serial.print(", Data Rate: RF24_250KBPS");
+    Serial.print(", Channel: 76");
+    Serial.print(", CRC: 16-bit");
+    Serial.println(", Address Width: 5 bytes");
+}
+
+void printRadioDiagnostics()
+{
+    // Print radio status for troubleshooting
+    Serial.println("=== Radio Diagnostics ===");
+    Serial.print("Is chip connected: ");
+    Serial.println(radio.isChipConnected() ? "YES" : "NO");
+    Serial.print("Is P variant: ");
+    Serial.println(radio.isPVariant() ? "YES" : "NO");
+    Serial.print("Data rate: ");
+    rf24_datarate_e datarate = radio.getDataRate();
+    Serial.println(datarate == RF24_250KBPS ? "250KBPS" : datarate == RF24_1MBPS ? "1MBPS"
+                                                                                 : "2MBPS");
+    Serial.print("Power level: ");
+    uint8_t power = radio.getPALevel();
+    Serial.println(power == RF24_PA_MIN ? "MIN" : power == RF24_PA_LOW ? "LOW"
+                                              : power == RF24_PA_HIGH  ? "HIGH"
+                                                                       : "MAX");
+    Serial.print("Channel: ");
+    Serial.println(radio.getChannel());
+    Serial.println("========================");
 }
 
 void loop()
 {
-    // Send control data every 200ms (5Hz - drone-like responsiveness)
+    // Check WiFi connection and reconnect if needed
+    static unsigned long lastWiFiCheck = 0;
+    if (millis() - lastWiFiCheck > 30000) // Check every 30 seconds
+    {
+        if (WiFi.status() != WL_CONNECTED)
+        {
+            Serial.println("WiFi disconnected, attempting reconnection...");
+            initializeWiFi();
+            if (WiFi.status() == WL_CONNECTED)
+            {
+                initializeFirebase();
+            }
+        }
+        lastWiFiCheck = millis();
+    }
+
+    // Send control data every 200ms (5Hz - proven working rate)
     if (millis() - lastControlSend > 200)
     {
         readJoystickInputs();
@@ -117,8 +191,8 @@ void loop()
         lastControlSend = millis();
     }
 
-    // Upload to Firebase every 10 seconds
-    if (millis() - lastFirebaseUpload > 10000 && firebaseReady && telemetryReceived)
+    // Upload to Firebase at configurable interval
+    if (millis() - lastFirebaseUpload > FIREBASE_UPLOAD_INTERVAL && telemetryReceived)
     {
         uploadTelemetryToFirebase();
         lastFirebaseUpload = millis();
@@ -129,7 +203,20 @@ void loop()
 
 void sendControlData()
 {
-    bool result = radio.write(&controlData, sizeof(controlData));
+    bool result = false;
+    int attempts = 0;
+    const int maxAttempts = 3; // Restore proven working retry count
+
+    // Try multiple times for reliability
+    while (!result && attempts < maxAttempts)
+    {
+        result = radio.write(&controlData, sizeof(controlData));
+        if (!result)
+        {
+            attempts++;
+            delayMicroseconds(100); // Small delay between attempts
+        }
+    }
 
     static int packetNumber = 1;
     static int successCount = 0, failCount = 0, telemetryCount = 0;
@@ -151,12 +238,19 @@ void sendControlData()
             }
         }
 
-        // Print detailed info only every 2 seconds (to avoid spam at 5Hz)
+        // Print detailed info only every 2 seconds (to avoid spam)
         if (millis() - lastDetailedPrint > 2000 && telemetryReceived)
         {
             Serial.print("Packet #");
             Serial.print(packetNumber);
-            Serial.print(" SUCCESS - T:");
+            Serial.print(" SUCCESS");
+            if (attempts > 1)
+            {
+                Serial.print(" (retry #");
+                Serial.print(attempts);
+                Serial.print(")");
+            }
+            Serial.print(" - T:");
             Serial.print(controlData.throttle);
             Serial.print(" R:");
             Serial.print(controlData.roll);
@@ -164,35 +258,64 @@ void sendControlData()
             Serial.print(controlData.pitch);
             Serial.print(" Y:");
             Serial.print(controlData.yaw);
+
+            // Show button states when pressed
+            if (controlData.joy1_btn == 0)
+                Serial.print(" [JOY1-BTN]");
+            if (controlData.joy2_btn == 0)
+                Serial.print(" [JOY2-BTN]");
+
+            // Show toggle switch states
+            if (controlData.toggle1 == 1)
+                Serial.print(" [SW1-ON]");
+            if (controlData.toggle2 == 1)
+                Serial.print(" [SW2-ON]");
+
             Serial.print(" | Telemetry - Temp:");
             Serial.print(telemetryData.temperature / 100.0);
             Serial.print("°C Press:");
             Serial.print(telemetryData.pressure / 10.0);
-            Serial.print("hPa Hum:");
+            Serial.print("hPa Alt:");
+            Serial.print(telemetryData.altitude / 100.0, 2); // Display altitude in meters with 2 decimals
+            Serial.print("m Hum:");
             Serial.print(telemetryData.humidity);
             Serial.print("% GPS:");
             Serial.print(telemetryData.satellites);
-            Serial.print(" sats Batt:");
+            Serial.print(" sats Lat:");
+            Serial.print(telemetryData.latitude / 100.0, 2);
+            Serial.print(" Lng:");
+            Serial.print(telemetryData.longitude / 100.0, 2);
+            Serial.print(" Batt:");
             Serial.print(telemetryData.battery);
-            Serial.println("mV");
+            Serial.print("mV Lux:");
+            Serial.print(telemetryData.lux);
+            Serial.print("lx UV:");
+            Serial.print(telemetryData.uvIndex / 100.0);
+            Serial.print(" CO2:");
+            Serial.print(telemetryData.eCO2);
+            Serial.print("ppm TVOC:");
+            Serial.print(telemetryData.TVOC);
+            Serial.println("ppb");
             lastDetailedPrint = millis();
         }
     }
     else
     {
         failCount++;
-        // Only print failures immediately
+        // Print failures with attempt count for debugging
         Serial.print("Packet #");
         Serial.print(packetNumber);
-        Serial.println(" FAILED");
+        Serial.print(" FAILED after ");
+        Serial.print(attempts);
+        Serial.println(" attempts");
     }
 
     packetNumber++;
 
-    // Print status every 50 packets (10 seconds at 5Hz)
-    if (packetNumber % 50 == 0)
+    // Print status every 25 packets (5 seconds at 5Hz)
+    if (packetNumber % 25 == 0)
     {
-        Serial.print("Fast Control Status - Success: ");
+        Serial.print("Control Status - Success: ");
         Serial.print(successCount);
         Serial.print(", Failed: ");
         Serial.print(failCount);
@@ -201,10 +324,22 @@ void sendControlData()
         Serial.print(", Success rate: ");
         if (successCount + failCount > 0)
         {
-            Serial.print((successCount * 100) / (successCount + failCount));
+            int successRate = (successCount * 100) / (successCount + failCount);
+            Serial.print(successRate);
+            Serial.print("%");
+
+            // Print diagnostics if success rate is low
+            if (successRate < 80)
+            {
+                Serial.println();
+                printRadioDiagnostics();
+            }
         }
-        Serial.print("%, Rate: 5Hz, Firebase: ");
-        Serial.println(firebaseReady ? "Connected" : "Disconnected");
+        Serial.print(", Rate: 5Hz, Firebase: ");
+        Serial.print(firebaseReady ? "Connected" : "Disconnected");
+        Serial.print(" (Upload every ");
+        Serial.print(FIREBASE_UPLOAD_INTERVAL / 1000);
+        Serial.println("s)");
         successCount = 0;
         failCount = 0;
         telemetryCount = 0;
@@ -218,6 +353,15 @@ void readJoystickInputs()
     int joy2_x = analogRead(JOY2_X_PIN);
     int joy2_y = analogRead(JOY2_Y_PIN);
 
+    // Read joystick buttons (active LOW, so invert the reading)
+    controlData.joy1_btn = digitalRead(JOY1_BTN_PIN); // Note: JOY1 button may not function well
+    controlData.joy2_btn = digitalRead(JOY2_BTN_PIN);
+
+    // Read toggle switches (active LOW, so invert the reading)
+    controlData.toggle1 = !digitalRead(TOGGLE_SW1_PIN); // Invert: 0=off, 1=on
+    controlData.toggle2 = !digitalRead(TOGGLE_SW2_PIN); // Invert: 0=off, 1=on
+
+    // Map analog readings to control values
     controlData.throttle = map(joy1_y, 0, 4095, -1000, 1000);
     controlData.yaw = map(joy1_x, 0, 4095, -1000, 1000);
     controlData.roll = map(joy2_x, 0, 4095, -1000, 1000);
@@ -227,6 +371,11 @@ void readJoystickInputs()
 void initializeWiFi()
 {
     Serial.println("Connecting to WiFi...");
+
+    // Disconnect any existing connection first
+    WiFi.disconnect();
+    delay(100);
+
     WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
 
     int attempts = 0;
@@ -240,6 +389,8 @@ void initializeWiFi()
     if (WiFi.status() == WL_CONNECTED)
     {
         Serial.println("\nWiFi connected!");
+        Serial.print("IP address: ");
+        Serial.println(WiFi.localIP());
         configTime(0, 0, "pool.ntp.org");
     }
     else
@@ -256,6 +407,10 @@ void initializeFirebase()
     config.host = FIREBASE_HOST;
     config.signer.tokens.legacy_token = FIREBASE_AUTH;
 
+    // Add timeout and SSL settings for better reliability
+    config.timeout.serverResponse = 10 * 1000;   // 10 seconds timeout
+    config.timeout.socketConnection = 10 * 1000; // 10 seconds socket timeout
+
     Firebase.begin(&config, &auth);
     Firebase.reconnectWiFi(true);
 
@@ -264,32 +419,78 @@ void initializeFirebase()
         Serial.println("Firebase connected!");
         firebaseReady = true;
     }
+    else
+    {
+        Serial.println("Firebase connection failed, will retry later");
+        firebaseReady = false;
+    }
 }
 
 void uploadTelemetryToFirebase()
 {
-    if (!Firebase.ready() || !telemetryReceived)
+    if (!telemetryReceived)
         return;
 
+    // Check Firebase connection and try to reconnect if needed
+    if (!Firebase.ready())
+    {
+        static unsigned long lastReconnectAttempt = 0;
+        if (millis() - lastReconnectAttempt > 30000) // Try reconnect every 30 seconds
+        {
+            Serial.println("Firebase disconnected, attempting reconnection...");
+            initializeFirebase();
+            lastReconnectAttempt = millis();
+        }
+        return;
+    }
+
+    // Create JSON payload - ONLY sensor data from drone, no control data
     FirebaseJson json;
-    json.set("timestamp", (int)time(nullptr));
+    unsigned long timestamp = time(nullptr);
+    json.set("timestamp", (int)timestamp);
     json.set("temperature", telemetryData.temperature / 100.0);
     json.set("humidity", telemetryData.humidity);
     json.set("pressure", telemetryData.pressure / 10.0);
+    json.set("altitude", telemetryData.altitude / 100.0); // Store altitude in meters with 2 decimal precision
     json.set("battery", telemetryData.battery);
-    json.set("control_throttle", controlData.throttle);
-    json.set("control_roll", controlData.roll);
-    json.set("control_pitch", controlData.pitch);
-    json.set("control_yaw", controlData.yaw);
+    json.set("lux", telemetryData.lux);
+    json.set("uvIndex", telemetryData.uvIndex / 100.0);
+    json.set("eCO2", telemetryData.eCO2);
+    json.set("TVOC", telemetryData.TVOC);
+    json.set("gps_satellites", telemetryData.satellites);
+    json.set("gps_latitude", telemetryData.latitude / 100.0);
+    json.set("gps_longitude", telemetryData.longitude / 100.0);
     json.set("status", telemetryData.status);
-    json.set("control_rate", "5Hz");
+    // Note: Control data and button states are NOT uploaded to cloud
 
-    if (Firebase.setJSON(firebaseData, "/telemetry/latest", json))
+    // Store data with timestamp - single node, latest record is most recent
+    String dataPath = "/telemetry/" + String(timestamp);
+
+    bool uploadSuccess = Firebase.setJSON(firebaseData, dataPath, json);
+
+    // Simple upload result reporting
+    if (uploadSuccess)
     {
-        Serial.println("✓ Data uploaded to Firebase!");
+        static unsigned long lastSuccessTime = millis();
+        if (millis() - lastSuccessTime > 5000) // Only print success every 5 seconds to reduce spam
+        {
+            Serial.println("✓ Firebase upload successful");
+            lastSuccessTime = millis();
+        }
+        firebaseReady = true; // Confirm connection is working
     }
     else
     {
-        Serial.println("✗ Firebase upload failed");
+        Serial.print("✗ Firebase upload failed: ");
+        Serial.println(firebaseData.errorReason());
+
+        // If it's an SSL error, mark Firebase as not ready for reconnection attempt
+        if (firebaseData.errorReason().indexOf("ssl") >= 0 ||
+            firebaseData.errorReason().indexOf("SSL") >= 0 ||
+            firebaseData.errorReason().indexOf("engine") >= 0)
+        {
+            Serial.println("SSL error detected, will attempt reconnection");
+            firebaseReady = false;
+        }
     }
 }

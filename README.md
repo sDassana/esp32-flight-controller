@@ -187,16 +187,18 @@ float vIn = vOut * 5.0;
 
 -Microcontroller - ESP32 wroom 32
 
-- 2 Joy Stick modules
 - Joystick module 1
+  -X - GPIO 39
+  -y - GPIO 36
+  -BTN - GPIO 33 (Not functioning well)
+
+- 2 Joy Stick modules
+- Joystick module 2
   -X - GPIO 34
   -y - GPIO 35
   -BTN - GPIO 32
 
-- Joystick module 2
-  -X - GPIO 36
-  -y - GPIO 39
-  -BTN - GPIO 33 (Not functioning well)
+
 
 - Toggle Switches
 - Toggle switch 1
