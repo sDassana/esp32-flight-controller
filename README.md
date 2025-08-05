@@ -1,226 +1,376 @@
-Flight Controller for Custom DIY Drone using ESP32 (NodeMCU ESP-WROOM-32)
+# 🚁 ESP32 Flight Controller
 
-const char *ssid = "Dialog 4G";  
-const char *password = "0N7NT00ANTQ";
+**Advanced quadcopter flight controller firmware featuring comprehensive sensor integration, RF remote control, and real-time telemetry systems.**
 
-## Hardware Overview:
+[![Platform](https://img.shields.io/badge/platform-ESP32-blue.svg)](https://www.espressif.com/en/products/socs/esp32)
+[![Framework](https://img.shields.io/badge/framework-Arduino-green.svg)](https://www.arduino.cc/)
+[![License](https://img.shields.io/badge/license-MIT-brightgreen.svg)](LICENSE)
+[![Status](https://img.shields.io/badge/status-RF%20Control%20Complete-success.svg)](PROJECT_PROGRESS.md)
 
-- Microcontroller: ESP32 (NodeMCU ESP-WROOM-32)
-- GPS TX: GPIO 16
-- Communication Module: NRF24L01 + PA + LNA (via SPI)
-- channel 76 to avoid wifi interference
+## 📋 Table of Contents
 
-  - CE: GPIO 4
-  - CSN: GPIO 5
-  - SCK: GPIO 18
-  - MOSI: GPIO 23
-  - MISO: GPIO 19
+- [Overview](#overview)
+- [Features](#features)
+- [Hardware Specifications](#hardware-specifications)
+- [Pin Configuration](#pin-configuration)
+- [Communication Protocols](#communication-protocols)
+- [Installation](#installation)
+- [Usage](#usage)
+- [System Architecture](#system-architecture)
+- [Contributing](#contributing)
+- [License](#license)
 
-- ESC Control (PWM Outputs to Brushless Motors):
+## 🔍 Overview
 
-  - ESC1: GPIO 13
-  - ESC2: GPIO 12
-  - ESC3: GPIO 14
-  - ESC4: GPIO 27
+This project implements a sophisticated flight controller for a custom quadcopter using the ESP32 microcontroller. The system features advanced sensor fusion, RF remote control, comprehensive telemetry, and FreeRTOS-based multi-threading architecture for real-time flight control operations.
 
-- Use servo library to send PWM signals to ESCs instead of ledwrite.
-- Calibrate ESCS at the startup by MAX throttle at power ON and MIN after 2s delay
+## ✨ Features
 
-- I2C Bus (Shared SDA/SCL):
+### 🎮 RF Remote Control System
 
-  - SDA: GPIO 21
-  - SCL: GPIO 22
+- **Direct joystick control** with dual analog joysticks
+- **X-configuration motor mixing** for precise quadcopter control
+- **5Hz control transmission** for responsive real-time control
+- **Toggle switch arming system** with emergency stop functionality
+- **ACK payload telemetry** for live sensor feedback
 
-- I2C Devices:
+### 🧠 Advanced Flight Control
 
-  - PCA9548A I2C Multiplexer (Address: 0x70; VL53L0X sensors connected to channels 0–3)
-  - BME280 (Barometric pressure + temperature sensor, Addr: 0x76 or 0x77)
-  - MPU6050 (Gyroscope + Accelerometer, Addr: 0x68)
-  - ENS160 + AHT21 sensor
-  - VL53L0X x4 (Time-of-Flight distance sensors, all with same address, handled via PCA9548A)
+- **FreeRTOS multi-threading** with dedicated motor control task
+- **50Hz motor updates** for smooth ESC control
+- **Immediate ESC calibration** on power-up
+- **Safety systems** including control timeout and arming protection
+- **PID stabilization ready** (upcoming feature)
 
--Analog device
+### 📡 Comprehensive Sensor Suite
 
-- GUVA-S12SD uv sensor - 36 Pin (SP)
+- **Environmental monitoring**: Temperature, humidity, pressure, air quality
+- **Navigation sensors**: GPS positioning, IMU orientation, altitude tracking
+- **Obstacle detection**: 4x Time-of-Flight sensors with I2C multiplexing
+- **Light monitoring**: UV index and ambient light measurement
+- **Battery monitoring**: Real-time voltage and percentage tracking
 
-- LEDs (for Navigation Lights):
+### 🌐 Connectivity & Telemetry
 
-  - PIN 32 - front right - green
-  - PIN 33 - back right - green
-  - PIN 25 - back left - red
-  - PIN 17 - front center - white
-  - PIN 02 - front left - red
-  - PIN 15 - back center - white
-  - Use PWM or digitalWrite for color control
+- **NRF24L01+ PA+LNA** for long-range RF communication
+- **WiFi connectivity** for web dashboard access
+- **Real-time telemetry** with 2-decimal precision altitude tracking
+- **Data logging** with Firebase integration
+- **Web-based control interface** for testing and configuration
 
-Front/Back Center White LEDs:
+## 🔧 Hardware Specifications
 
-- Arming Blink: Slow blink when waiting to arm.
-- Flight Mode On: Solid light.
-- Throttle Sync Pulse: (Optional) Flash intensity reflects throttle level.
+### 🎯 Main Controller
 
-Nav Lights (Red/Green):
+| Component           | Model                      | Purpose                                          |
+| ------------------- | -------------------------- | ------------------------------------------------ |
+| **Microcontroller** | ESP32 NodeMCU ESP-WROOM-32 | Main flight controller with dual-core processing |
 
-- Always ON during powered-on state.
-- Helps in identifying orientation at night (Red = left, Green = right).
+### 📡 Communication Modules
 
-- Buzzer : GPio 26
+| Component     | Model            | Interface | Purpose                               |
+| ------------- | ---------------- | --------- | ------------------------------------- |
+| **RF Module** | NRF24L01+ PA+LNA | SPI       | Long-range remote control & telemetry |
+| **GPS**       | NEO-6M           | UART      | Position tracking and navigation      |
+| **WiFi**      | Built-in ESP32   | -         | Web dashboard and configuration       |
 
-## Hovering logic
+### 🔬 Sensor Array
 
-If altitude error ≈ 0, maintain current throttle
-If rising too much, reduce motor speed proportionally
-If falling, increase motor speed
+| Sensor              | Model          | Interface           | Measurement                      |
+| ------------------- | -------------- | ------------------- | -------------------------------- |
+| **IMU**             | MPU6050        | I2C (0x68)          | Gyroscope + Accelerometer        |
+| **Environmental**   | BME280         | I2C (0x76/0x77)     | Pressure, temperature, humidity  |
+| **Air Quality**     | ENS160 + AHT21 | I2C                 | CO₂, TVOC, temperature, humidity |
+| **Light**           | BH1750         | I2C                 | Ambient light intensity          |
+| **UV Sensor**       | GUVA-S12SD     | Analog              | UV index monitoring              |
+| **Distance**        | 4x VL53L0X     | I2C via Multiplexer | Obstacle detection               |
+| **I2C Multiplexer** | PCA9548A       | I2C (0x70)          | Sensor channel switching         |
 
-The `hover_throttle` point (i.e., where total motor thrust equals drone weight) is determined experimentally.(Have not fond yet, it wil be updated here when found )
-This value is used as the baseline in altitude PID and mapped to joystick neutral position.
+### ⚡ Power & Control
 
-## 📡 NRF24L01 Communication Protocol
+| Component   | Purpose             | Specifications                    |
+| ----------- | ------------------- | --------------------------------- |
+| **ESCs**    | Motor speed control | 4x Brushless ESC with PWM control |
+| **Motors**  | Propulsion          | EMAX 980KV brushless motors       |
+| **Battery** | Power supply        | 3S LiPo with voltage monitoring   |
+| **LEDs**    | Navigation lights   | RGB status indicators             |
+| **Buzzer**  | Audio feedback      | Status and alert sounds           |
 
-The drone uses an **NRF24L01+ PA+LNA** module for long-range wireless communication with a ground remote. To ensure reliable, collision-free communication, the remote initiates all communication, and the drone replies with telemetry using the **ACK payload feature** of the NRF24L01.
+## 📌 Pin Configuration
 
-## Power
+### 🎮 Remote Controller Pins
 
-- All components powered via filtered power supply (5V and 3.3V regulated lines)
-- NRF24L01 is powered via a dedicated filtered 3.3V module (NOT from ESP32)
+| Function            | Component | GPIO Pin | Notes                         |
+| ------------------- | --------- | -------- | ----------------------------- |
+| **Joystick 1 X**    | Analog    | GPIO 39  | Primary control stick         |
+| **Joystick 1 Y**    | Analog    | GPIO 36  | Primary control stick         |
+| **Joystick 1 BTN**  | Digital   | GPIO 33  | Button (not functioning well) |
+| **Joystick 2 X**    | Analog    | GPIO 34  | Secondary control stick       |
+| **Joystick 2 Y**    | Analog    | GPIO 35  | Secondary control stick       |
+| **Joystick 2 BTN**  | Digital   | GPIO 32  | Button input                  |
+| **Toggle Switch 1** | Digital   | GPIO 27  | ARM/DISARM control            |
+| **Toggle Switch 2** | Digital   | GPIO 14  | Emergency stop                |
 
-##Goals:
+### 🚁 Drone Controller Pins
 
-- Receive control signals from remote via NRF24L01
-- Read IMU data from MPU6050 for orientation
-- Use BME280 for altitude estimation
-- Read proximity from 4x VL53L0X sensors via PCA9548A
-- Control ESCs via PWM based on input and sensor feedback (PID control)
-- Light up RGB LEDs based on status/mode
-- Build modular, non-blocking code using state machine or task scheduler
+#### Motor Control (ESC PWM Outputs)
 
-##Setup_Requirements:
+| Motor       | Position    | GPIO Pin | ESC Connection   |
+| ----------- | ----------- | -------- | ---------------- |
+| **Motor 1** | Front Right | GPIO 13  | ESC1 signal wire |
+| **Motor 2** | Front Left  | GPIO 12  | ESC2 signal wire |
+| **Motor 3** | Back Left   | GPIO 14  | ESC3 signal wire |
+| **Motor 4** | Back Right  | GPIO 27  | ESC4 signal wire |
 
-- Use Wire.h for I2C communication
-- Use SPI.h for NRF24L01
-- Include Adafruit_BMP280, Adafruit_MPU6050, VL53L0X libraries
-- Use RF24 library for wireless communication
-- Use PCA9548A-compatible I2C switching logic
-- Consider FreeRTOS tasks or timer interrupts for consistent loop timing
+#### Communication Interfaces
 
-#ESP32_Weather_Drone_Firmware
+| Interface           | Component | GPIO Pins                                  | Configuration                            |
+| ------------------- | --------- | ------------------------------------------ | ---------------------------------------- |
+| **SPI (NRF24L01+)** | RF Module | CE: 4, CSN: 5, SCK: 18, MOSI: 23, MISO: 19 | Channel 76 (WiFi interference avoidance) |
+| **I2C Bus**         | Sensors   | SDA: 21, SCL: 22                           | Shared bus with pull-up resistors        |
+| **UART**            | GPS       | RX: 16                                     | GPS data reception                       |
 
-This firmware powers a custom-built drone using an ESP32 (NodeMCU ESP-WROOM-32). It supports sensor fusion, telemetry, and wireless control.
+#### Sensor Connections
 
----
+| Sensor Type         | GPIO Pin | Interface  | Purpose               |
+| ------------------- | -------- | ---------- | --------------------- |
+| **UV Sensor**       | GPIO 36  | Analog ADC | UV index measurement  |
+| **Battery Monitor** | GPIO 35  | Analog ADC | Voltage divider input |
 
-## 🚁 Components Overview
+#### Status Indicators
 
-| Component      | Purpose                                      |
-| -------------- | -------------------------------------------- |
-| ESP32          | Main flight controller + WiFi                |
-| MPU6050        | Roll, pitch, yaw (IMU)                       |
-| BME280         | Barometric altitude + temperature + humidity |
-| VL53L0X ×4     | Obstacle detection (via PCA9548A mux)        |
-| ENS160 + AHT21 | CO₂, TVOC, temp, humidity                    |
-| BH1750 + GUVA  | Light + UV intensity                         |
-| GPS NEO-6M     | Position and velocity                        |
-| NRF24L01+      | RF telemetry and remote control              |
-| ESCs + Motors  | Propulsion (EMAX 980KV motors)               |
-| RGB LEDs       | Navigation + status indicators               |
-| Buzzer         | Status sound                                 |
+| LED Position     | Color | GPIO Pin | Function         |
+| ---------------- | ----- | -------- | ---------------- |
+| **Front Right**  | Green | GPIO 32  | Navigation light |
+| **Back Right**   | Green | GPIO 33  | Navigation light |
+| **Back Left**    | Red   | GPIO 25  | Navigation light |
+| **Front Center** | White | GPIO 17  | Status indicator |
+| **Front Left**   | Red   | GPIO 02  | Navigation light |
+| **Back Center**  | White | GPIO 15  | Status indicator |
+| **Buzzer**       | Audio | GPIO 26  | Alert sounds     |
 
----
+## 📡 Communication Protocols
 
-## 📡 Communication
+### 📻 NRF24L01+ RF Communication
 
-- **NRF24L01+** used for telemetry & command between drone and remote
-- **I2C** used for most sensors with level-shifter and pull-ups
+- **Frequency**: 2.4GHz, Channel 76 (WiFi interference avoidance)
+- **Data Rate**: 250KBPS for maximum range
+- **Power Level**: RF24_PA_HIGH for extended range
+- **Control Rate**: 5Hz transmission (200ms intervals)
+- **Protocol**: ACK payload for bidirectional communication
+- **Range**: Extended range with PA+LNA amplifier
 
----
+### 🔄 I2C Sensor Bus
 
-## ⚙️ Key Features
+- **Bus Speed**: Standard 100kHz
+- **Pull-up Resistors**: 4.7kΩ on SDA/SCL lines
+- **Multiplexing**: PCA9548A for multiple VL53L0X sensors
+- **Device Addresses**:
+  - PCA9548A: 0x70
+  - BME280: 0x76/0x77
+  - MPU6050: 0x68
 
-- Full **PID-based stabilization** (Roll, Pitch, Yaw, Altitude)
-- **Live sensor data** sent via NRF
-- ESCs armed at boot, sensors calibrated dynamically
-- **4-layer PCB** for compact, efficient layout (ESP + MUX underside)
+### 🌐 WiFi Connectivity
 
----
+- **Mode**: Station mode for web dashboard
+- **Security**: WPA2 encryption
+- **Purpose**: Configuration interface and telemetry viewing
 
-## 🛠️ Build Environment
+## 🔋 Power Management
 
-- **Board:** `esp32doit-devkit-v1`
-- **Framework:** Arduino
-- **Tool:** PlatformIO or Arduino IDE
+### Battery Monitoring System
 
-##Batter_Voltage_Monitoring
+The system monitors a 3S LiPo battery using a precision voltage divider:
 
-The drone monitors the voltage of a 3S LiPo battery using a voltage divider circuit connected to the ESP32's ADC pin (GPIO 35).
+**Voltage Divider Configuration:**
 
-###Voltage_Divider_Configuration
+- **R1 (Top)**: 30kΩ (3x 10kΩ in series)
+- **R2 (Bottom)**: 7.5kΩ (parallel combination of 30kΩ and 10kΩ)
+- **Divider Ratio**: 0.2 (scales 12.6V max to 2.52V)
 
-The divider is made using standard 10kΩ resistors:
-
-- **Top leg (R1):** 3 × 10kΩ resistors in series → 30kΩ
-- **Bottom leg (R2):** A parallel combination of:
-  - 3 × 10kΩ resistors in series → 30kΩ
-  - 1 × 10kΩ resistor
-
-**Effective bottom resistance (R2):**
-\[
-\frac{1}{R2} = \frac{1}{30k} + \frac{1}{10k} = \frac{4}{30k} \Rightarrow R2 = 7.5kΩ
-\]
-
-**Divider ratio:**
-\[
-V*{out} = V*{in} \times \frac{7.5}{37.5} = V\_{in} \times 0.2
-\]
-
-This scales the full 3S LiPo range (up to 12.6V) down to ~2.52V, which is safe for the ESP32 ADC input.
-
-###ADC_Reading_and_Conversion
-
-The ESP32 reads the voltage at pin 35 using its 12-bit ADC and converts it to the actual battery voltage using the following formula:
+**ADC Conversion:**
 
 ```cpp
-float vOut = (raw / 4095.0) * 3.3;
-float vIn = vOut * 5.0;
+float vOut = (adcReading / 4095.0) * 3.3;  // ESP32 12-bit ADC
+float batteryVoltage = vOut * 5.0;         // Scale back to actual voltage
+```
 
+### Power Distribution
 
-#Remote_Specs
+- **5V Rail**: Regulated supply for motors and high-power components
+- **3.3V Rail**: ESP32 and sensor power with dedicated filtering
+- **NRF24L01**: Dedicated filtered 3.3V supply (not from ESP32)
 
--Microcontroller - ESP32 wroom 32
+## � Status Indication System
 
-- Joystick module 1
-  -X - GPIO 39
-  -y - GPIO 36
-  -BTN - GPIO 33 (Not functioning well)
+### Navigation Lights
 
-- 2 Joy Stick modules
-- Joystick module 2
-  -X - GPIO 34
-  -y - GPIO 35
-  -BTN - GPIO 32
+| Position        | Color | Behavior  | Purpose              |
+| --------------- | ----- | --------- | -------------------- |
+| **Front Left**  | Red   | Always ON | Port navigation      |
+| **Front Right** | Green | Always ON | Starboard navigation |
+| **Back Left**   | Red   | Always ON | Port navigation      |
+| **Back Right**  | Green | Always ON | Starboard navigation |
 
+### Status Lights
 
+| Position         | Color | Behavior   | Indication         |
+| ---------------- | ----- | ---------- | ------------------ |
+| **Front Center** | White | Slow blink | Waiting to arm     |
+| **Front Center** | White | Solid      | Flight mode active |
+| **Back Center**  | White | Variable   | System status      |
 
-- Toggle Switches
-- Toggle switch 1
-  -pin1 - GPIO 27
-  -pin2 - GND
-  -pin3 - none
+### Audio Feedback
 
-- Toggle switch 2
-  -pin1 - GPIO 14
-  -pin2 - GND
-  -pin3 - none
+- **Buzzer**: Status alerts and system notifications
+- **Boot Sequence**: Confirmation sounds during initialization
+- **Error Alerts**: Audio warnings for system issues
 
-- Communication Module: NRF24L01 + PA + LNA (via SPI)
-- channel 76 to avoid wifi interference
+## 🏗️ System Architecture
 
-  - CE: GPIO 4
-  - CSN: GPIO 5
-  - SCK: GPIO 18
-  - MOSI: GPIO 23
-  - MISO: GPIO 19
+### FreeRTOS Task Structure
 
-- Display (I2C)
-  - SDA: GPIO 21
-  - SCL: GPIO 22
+| Task                 | Core   | Priority | Frequency | Purpose                       |
+| -------------------- | ------ | -------- | --------- | ----------------------------- |
+| **Motor Control**    | Core 1 | 4 (High) | 50Hz      | ESC PWM updates               |
+| **RF Communication** | Core 0 | 3        | 5Hz       | Remote control data           |
+| **Sensor Reading**   | Core 0 | 2        | 10Hz      | IMU and environmental sensors |
+| **Status Updates**   | Core 0 | 1        | 1Hz       | LED and buzzer control        |
+
+### Flight Control Logic
+
+```
+┌─────────────────┐    ┌──────────────────┐    ┌─────────────────┐
+│   RF Remote     │───▶│  Flight Control  │───▶│   Motor Mixing  │
+│   Joystick      │    │   Processing     │    │  (X-Config)     │
+└─────────────────┘    └──────────────────┘    └─────────────────┘
+                                │                        │
+                                ▼                        ▼
+┌─────────────────┐    ┌──────────────────┐    ┌─────────────────┐
+│   Sensor Data   │───▶│  PID Control     │    │   ESC Control   │
+│  (IMU, Altitude)│    │   (Future)       │    │   (50Hz PWM)    │
+└─────────────────┘    └──────────────────┘    └─────────────────┘
+```
+
+## 🎮 Flight Control Modes
+
+### Current Implementation
+
+- **Manual Mode**: Direct joystick control with motor mixing
+- **Safety Systems**: Arming sequence and emergency stop
+- **Stability**: Basic motor mixing for quadcopter configuration
+
+### Planned Features (PID Integration)
+
+- **Stabilized Mode**: Automatic leveling with manual control
+- **Altitude Hold**: Barometric altitude maintenance
+- **Position Hold**: GPS-based position stabilization
+- **Auto-Level**: Automatic return to level flight
+
+## 🛠️ Installation
+
+### Prerequisites
+
+- **PlatformIO** or **Arduino IDE**
+- **ESP32 Board Package**
+- Required libraries (see `platformio.ini`)
+
+### Hardware Setup
+
+1. **Wire connections** according to pin configuration table
+2. **Power supply** with proper voltage regulation
+3. **Antenna mounting** for NRF24L01+ module
+4. **Propeller installation** with correct rotation direction
+
+### Software Installation
+
+```bash
+# Clone the repository
+git clone https://github.com/yourusername/esp32-flight-controller.git
+
+# Open in PlatformIO
+cd esp32-flight-controller
+pio run
+
+# Upload to ESP32
+pio run --target upload
+```
+
+## 🚀 Usage
+
+### Initial Setup
+
+1. **Power on** the system - ESCs will auto-calibrate
+2. **Connect remote** - Verify RF communication link
+3. **Arm system** - Use toggle switch SW1
+4. **Test controls** - Verify joystick response
+
+### Remote Control Operation
+
+- **Left Joystick**: Throttle (Y-axis) and Yaw (X-axis)
+- **Right Joystick**: Pitch (Y-axis) and Roll (X-axis)
+- **SW1 Toggle**: ARM/DISARM system
+- **SW2 Toggle**: Emergency stop (immediate motor shutdown)
+
+### Safety Procedures
+
+- **Always arm on level surface** with clear propeller area
+- **Keep emergency stop accessible** during operation
+- **Monitor battery voltage** to prevent over-discharge
+- **Respect control timeout** - system disarms after 1 second of lost communication
+
+## 📊 Development Status
+
+### ✅ Completed Features
+
+- RF remote control system with joystick integration
+- FreeRTOS multi-threading architecture
+- Comprehensive sensor integration
+- ESC control with auto-calibration
+- Safety systems and status indicators
+- Real-time telemetry transmission
+
+### 🔄 In Progress
+
+- PID stabilization controller implementation
+- MPU6050 sensor fusion algorithms
+- Advanced flight modes
+
+### 📋 Planned Features
+
+- Autonomous flight capabilities
+- GPS waypoint navigation
+- Advanced telemetry dashboard
+- Mobile app integration
+
+For detailed progress tracking, see [PROJECT_PROGRESS.md](PROJECT_PROGRESS.md).
+
+## 🤝 Contributing
+
+Contributions are welcome! Please read our contributing guidelines and submit pull requests for any improvements.
+
+### Development Guidelines
+
+- Follow Arduino/ESP32 coding standards
+- Test thoroughly before submitting
+- Update documentation for new features
+- Maintain backward compatibility when possible
+
+## 📄 License
+
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+
+## 🙏 Acknowledgments
+
+- ESP32 community for excellent documentation
+- Arduino ecosystem for comprehensive libraries
+- FreeRTOS for real-time operating system capabilities
+- Open-source drone community for inspiration and guidance
+
+---
+
+**⚠️ Safety Notice**: This is experimental flight controller software. Always follow proper safety procedures when testing with live motors and propellers. Test in controlled environments and never operate near people or property.
+
+```
+
 ```
