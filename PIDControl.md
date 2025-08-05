@@ -6,37 +6,39 @@ This project implements a PID-based flight controller for a custom ESP32-powered
 
 ## ⚙️ Motor Pin Allocation (PWM Outputs)
 
-| GPIO Pin | Motor Position | Rotation Direction      | Propeller Type |
-| -------- | -------------- | ----------------------- | -------------- |
-| GPIO 27  | Back Left      | Clockwise (CW)          | CW             |
-| GPIO 14  | Front Left     | Counter-Clockwise (CCW) | CCW            |
-| GPIO 12  | Back Right     | Counter-Clockwise (CCW) | CCW            |
-| GPIO 13  | Front Right    | Clockwise (CW)          | CW             |
+| GPIO Pin | Motor Position | Rotation Direction      | Propeller Type | Status    |
+| -------- | -------------- | ----------------------- | -------------- | --------- |
+| GPIO 27  | Back Left      | Clockwise (CW)          | CW             | ✅ Active |
+| GPIO 14  | Front Left     | Counter-Clockwise (CCW) | CCW            | ✅ Active |
+| GPIO 12  | Back Right     | Counter-Clockwise (CCW) | CCW            | ✅ Active |
+| GPIO 13  | Front Right    | Clockwise (CW)          | CW             | ✅ Active |
 
-> ⚠️ Motors are physically fixed to these pins due to soldered PCB. Rotation direction is adjusted via ESC wiring and propeller type.
+> ✅ **Current Status**: Motors are fully operational with RF remote control. ESC calibration occurs automatically on power-on. Toggle switch 1 arms/disarms motors, toggle switch 2 provides emergency stop.
 
 ---
 
 ## 🧠 Control Architecture
 
-- **Framework**: FreeRTOS with task-based scheduling
-- **Servo Control**: Uses `ESP32Servo` library for PWM motor control
-- **PID Controller**: `SimplePID` used with separate loops for:
-  - Roll
-  - Pitch
-  - (Optional) Yaw
-- **Motor Mixing**: Standard X-configuration quadcopter mixing
+- **Framework**: FreeRTOS with task-based scheduling ✅
+- **Servo Control**: Uses `ESP32Servo` library for PWM motor control ✅
+- **RF Communication**: NRF24L01 at 5Hz with ACK payload telemetry ✅
+- **Motor Control**: X-configuration mixing with toggle switch arming ✅
+- **PID Controller**: `SimplePID` planned for implementation:
+  - Roll stabilization (next priority)
+  - Pitch stabilization (next priority)
+  - Yaw control (optional)
+- **Sensor Integration**: MPU6050 gyro/accelerometer integration needed
 
 ---
 
 ## 📡 Communication Strategy
 
-- **Initial Phase**: Control & telemetry via WiFi dashboard
-- **Later Phase**:
-  - **Remote control** via NRF24L01 module
-  - **Telemetry transmission** to remote using **NRF24L01 acknowledgment payloads**
+- ✅ **Phase 1 Complete**: Control & telemetry via WiFi dashboard
+- ✅ **Phase 2 Complete**: **RF remote control** via NRF24L01 module
+- ✅ **Phase 3 Complete**: **Telemetry transmission** to remote using **NRF24L01 acknowledgment payloads**
+- ⬜ **Phase 4 Next**: **PID stabilization** with RF remote parameter tuning
 
-> 🛰️ ACK-based telemetry will enable the remote unit to receive live flight data with minimal bandwidth overhead. This will be implemented after basic stabilization is verified.
+> 🛰️ **Current Status**: Full RF communication system operational! Remote sends control commands at 5Hz, drone responds with real-time telemetry via ACK payloads. System includes comprehensive sensor data, motor arming controls, and emergency stop functionality.
 
 ---
 
@@ -64,17 +66,29 @@ This project implements a PID-based flight controller for a custom ESP32-powered
 
 ## 🛠️ Development Notes
 
-- Begin tuning PID with only P term → then add D → finally add I
-- Lift-off control testing done via WiFi sliders before enabling full stabilization
-- Telemetry and PID output logs available through the WiFi dashboard
-- NRF telemetry and remote control features are staged for later development
+- ✅ **ESC Control**: Motors respond to joystick inputs with X-configuration mixing
+- ✅ **RF Communication**: 5Hz control loop with telemetry feedback operational
+- ✅ **Joystick Sensitivity**: Tuned to ±3000 range for precise flight control
+- ✅ **Safety Systems**: Toggle switch arming, emergency stop, control timeout protection
+- ⬜ **Next Phase**: Begin PID tuning with P term → then add D → finally add I
+- ⬜ **PID Testing**: Real-time parameter adjustment via RF remote controls
+- ⬜ **Stabilization**: Implement MPU6050 feedback for roll/pitch/yaw control
+- ⬜ **Flight Testing**: Progressive testing from basic lift to full stabilization
 
 ---
 
-## 📅 Next Milestones
+## 📅 Progress Tracking
 
 - ✅ WiFi control tested
-- ⬜ Implement basic stabilization using PID
-- ⬜ Switch to RF remote input via NRF24L01
-- ⬜ Transmit telemetry using NRF24L01 with ACK payloads
-- ⬜ Add dynamic altitude hold and GPS switching logic
+- ✅ **FreeRTOS drone implementation complete** (droneFreeRTOS.ino)
+- ✅ **RF remote control implemented** (remoteControllerStable.ino)
+- ✅ **ESC control with joystick inputs** - Motors respond to remote commands
+- ✅ **5Hz RF24 communication** - Stable control at 200ms intervals
+- ✅ **Toggle switch arming system** - SW1=ARM, SW2=EMERGENCY_STOP
+- ✅ **Comprehensive telemetry system** - BME280, GPS, air quality sensors
+- ✅ **Joystick sensitivity tuning** - ±3000 range for precise control
+- ✅ **ESC calibration on power-on** - Immediate MAX→MIN calibration sequence
+- ⬜ **Implement PID stabilization** - Next critical milestone
+- ⬜ **PID tuning with RF remote** - Real-time PID parameter adjustment
+- ⬜ **Add MPU6050 integration** - Gyro/accelerometer for stabilization
+- ⬜ **Add dynamic altitude hold and GPS switching logic**
