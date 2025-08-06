@@ -1,10 +1,10 @@
 # 📋 Firmware Version Management
 
-## ✅ **STABLE VERSIONS** (Production Ready)
+## ✅ **STABLE** (Production Ready)
 
 ### 🚁 **Stable Drone Firmware**
 
-- **Location:** `firmware/stable_drone/droneFreeRTOS.ino`
+- **Location:** `firmware/stable/drone/droneFreeRTOS.ino`
 - **Status:** ✅ **PRODUCTION READY - TESTED AND OPERATIONAL**
 - **Features:**
   - Complete RF remote control with ESC integration
@@ -16,7 +16,7 @@
 
 ### 🎮 **Stable Remote Controller**
 
-- **Location:** `firmware/stable_remote/remoteControllerStable.ino`
+- **Location:** `firmware/stable/remote/remoteControllerStable.ino`
 - **Status:** ✅ **PRODUCTION READY - TESTED AND OPERATIONAL**
 - **Features:**
   - Dual joystick support with toggle switches
@@ -27,11 +27,11 @@
 
 ---
 
-## 🔬 **DEVELOPMENT VERSIONS** (Experimental)
+## 🔬 **DEVELOPMENT** (Experimental)
 
 ### 🚁 **Development Drone Firmware**
 
-- **Location:** `firmware/development_drone/droneFreeRTOS.ino`
+- **Location:** `firmware/development/drone/droneFreeRTOS.ino`
 - **Status:** 🔬 **DEVELOPMENT VERSION - EXPERIMENTAL**
 - **Purpose:** PID stabilization integration development
 - **Next Features:**
@@ -43,7 +43,7 @@
 
 ### 🎮 **Development Remote Controller**
 
-- **Location:** `firmware/development_remote/remoteControllerStable.ino`
+- **Location:** `firmware/development/remote/remoteControllerStable.ino`
 - **Status:** 🔬 **DEVELOPMENT VERSION - EXPERIMENTAL**
 - **Purpose:** Enhanced control features development
 - **Next Features:**
@@ -57,8 +57,8 @@
 
 ## 🔄 **Development Workflow**
 
-1. **Production Use:** Always use `stable_*` versions for actual flights
-2. **Development Work:** Use `development_*` versions for new features
+1. **Production Use:** Always use `stable/*` versions for actual flights
+2. **Development Work:** Use `development/*` versions for new features
 3. **Testing:** Thoroughly test development versions before promoting
 4. **Promotion:** Move stable features from development to stable versions
 5. **Backup:** Always maintain working stable versions

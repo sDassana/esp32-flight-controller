@@ -4,7 +4,11 @@
 
 [![Platform](https://img.shields.io/badge/platform-ESP32-blue.svg)](https://www.espressif.com/en/products/socs/esp32)
 [![Framework](https://img.shields.io/badge/framework-Arduino-green.svg)](https://www.arduino.cc/)
-[![License](https://img.shields.io/badge/license-MIT-brightgreen.svg)](LICENSE)
+[![License](htt- **🚁 [firmware/](firmware/)** - Stable and development firmware versions
+  - **✅ [stable/drone/](firmware/stable/drone/)** - Production-ready drone firmware
+  - **✅ [stable/remote/](firmware/stable/remote/)** - Production-ready remote firmware  
+  - **🔬 [development/drone/](firmware/development/drone/)** - PID integration development
+  - **🔬 [development/remote/](firmware/development/remote/)** - Enhanced features developmentimg.shields.io/badge/license-MIT-brightgreen.svg)](LICENSE)
 [![Status](https://img.shields.io/badge/status-RF%20Control%20Complete-success.svg)](PROJECT_PROGRESS.md)
 
 ## 📋 Table of Contents
@@ -30,16 +34,18 @@ This project implements a sophisticated flight controller for a custom quadcopte
 ```
 esp32-flight-controller/
 ├── 📁 firmware/              # Firmware organized by stability
-│   ├── 📁 stable_drone/      # Production-ready drone firmware
-│   │   └── droneFreeRTOS.ino # ✅ Stable production firmware
-│   ├── 📁 stable_remote/     # Production-ready remote firmware
-│   │   ├── remoteControllerStable.ino  # ✅ Stable remote controller
-│   │   └── FastControlRemote.ino       # Alternative stable remote
-│   ├── 📁 development_drone/ # Development drone firmware
-│   │   └── droneFreeRTOS.ino # 🔬 Development version for PID integration
-│   └── 📁 development_remote/ # Development remote firmware
-│       ├── remoteControllerStable.ino  # 🔬 Development remote
-│       └── FastControlRemote.ino       # Alternative development remote
+│   ├── 📁 stable/            # Production-ready firmware
+│   │   ├── 📁 drone/         # Stable drone firmware
+│   │   │   └── droneFreeRTOS.ino # ✅ Stable production firmware
+│   │   └── 📁 remote/        # Stable remote firmware
+│   │       ├── remoteControllerStable.ino  # ✅ Stable remote controller
+│   │       └── FastControlRemote.ino       # Alternative stable remote
+│   └── 📁 development/       # Development firmware
+│       ├── 📁 drone/         # Development drone firmware
+│       │   └── droneFreeRTOS.ino # 🔬 Development version for PID integration
+│       └── 📁 remote/        # Development remote firmware
+│           ├── remoteControllerStable.ino  # 🔬 Development remote
+│           └── FastControlRemote.ino       # Alternative development remote
 │
 ├── 📁 docs/                  # Project documentation
 │   ├── PROJECT_PROGRESS.md   # Development progress tracking
@@ -337,15 +343,15 @@ git clone https://github.com/yourusername/esp32-flight-controller.git
 cd esp32-flight-controller
 
 # For stable drone firmware (production use)
-cd firmware/stable_drone
+cd firmware/stable/drone
 # Upload droneFreeRTOS.ino using PlatformIO or Arduino IDE
 
 # For stable remote controller firmware (production use)
-cd ../stable_remote
+cd ../remote
 # Upload remoteControllerStable.ino using PlatformIO or Arduino IDE
 
 # For development versions (experimental features)
-cd ../development_drone
+cd ../../development/drone
 # Upload development firmware for PID integration work
 
 # Return to project root for PlatformIO builds
@@ -356,8 +362,8 @@ pio run --target upload
 ### Quick Start Guide
 
 1. **Hardware Assembly** - Follow pin configuration tables for wiring
-2. **Stable Firmware** - Use `firmware/stable_*` for production/flight operations
-3. **Development Firmware** - Use `firmware/development_*` for PID implementation and testing
+2. **Stable Firmware** - Use `firmware/stable/*` for production/flight operations
+3. **Development Firmware** - Use `firmware/development/*` for PID implementation and testing
 4. **Component Testing** - Use examples in `examples/` for individual component verification
 5. **System Integration** - Test complete system using tools in `tools/` directory
 6. **Documentation** - Refer to `docs/` for detailed progress and technical information## 🚀 Usage

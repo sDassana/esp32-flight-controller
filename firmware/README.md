@@ -4,9 +4,9 @@ This directory contains the firmware files for the ESP32 flight controller syste
 
 ## 📁 Directory Structure
 
-### ✅ **Stable Versions** (Production Ready)
+### ✅ **Stable** (Production Ready)
 
-#### 🚁 `/stable_drone`
+#### 🚁 `/stable/drone/`
 
 **Production drone flight controller firmware:**
 
@@ -18,7 +18,7 @@ This directory contains the firmware files for the ESP32 flight controller syste
   - ACK payload telemetry system
   - **Status:** Fully tested and operational
 
-#### 🎮 `/stable_remote`
+#### 🎮 `/stable/remote/`
 
 **Production remote controller firmware:**
 
@@ -29,9 +29,9 @@ This directory contains the firmware files for the ESP32 flight controller syste
   - **Status:** Fully tested and operational
 - `FastControlRemote.ino` - Alternative stable remote implementation
 
-### 🔬 **Development Versions** (Active Development)
+### 🔬 **Development** (Active Development)
 
-#### 🚁 `/development_drone`
+#### 🚁 `/development/drone/`
 
 **Development drone flight controller firmware:**
 
@@ -40,7 +40,7 @@ This directory contains the firmware files for the ESP32 flight controller syste
   - **Next Phase:** MPU6050 PID stabilization implementation
   - **Status:** Ready for PID controller development
 
-#### 🎮 `/development_remote`
+#### 🎮 `/development/remote/`
 
 **Development remote controller firmware:**
 
@@ -54,22 +54,22 @@ This directory contains the firmware files for the ESP32 flight controller syste
 
 ### For Production Use (Stable)
 
-1. **For Drone**: Upload `stable_drone/droneFreeRTOS.ino` to the ESP32 flight controller
-2. **For Remote**: Upload `stable_remote/remoteControllerStable.ino` to the ESP32 remote controller
+1. **For Drone**: Upload `stable/drone/droneFreeRTOS.ino` to the ESP32 flight controller
+2. **For Remote**: Upload `stable/remote/remoteControllerStable.ino` to the ESP32 remote controller
 3. **Configure**: Ensure matching RF24 channel settings (Channel 76)
 4. **Test**: Verify communication and control response before flight
 
 ### For Development (Experimental)
 
-1. **For Drone Development**: Upload `development_drone/droneFreeRTOS.ino` for PID implementation
-2. **For Remote Development**: Upload `development_remote/remoteControllerStable.ino` for feature testing
+1. **For Drone Development**: Upload `development/drone/droneFreeRTOS.ino` for PID implementation
+2. **For Remote Development**: Upload `development/remote/remoteControllerStable.ino` for feature testing
 3. **Backup**: Always keep stable versions as backup
 4. **Test Thoroughly**: Extensive testing required before flight operations
 
 ## 📋 Version Management
 
-- **Stable Versions**: Tested, reliable firmware for production use
-- **Development Versions**: Active development for new features (PID stabilization)
+- **Stable**: Tested, reliable firmware for production use
+- **Development**: Active development for new features (PID stabilization)
 - **Backup Strategy**: Always maintain working stable versions
 - **Update Process**: Test development → Validate → Promote to stable
 
