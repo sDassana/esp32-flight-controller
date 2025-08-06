@@ -1,12 +1,24 @@
 /*
- * Drone with Enhanced Sensor Suite - FreeRTOS Version
+ * DEVELOPMENT VERSION - Drone with Enhanced Sensor Suite - FreeRTOS Version
+ * 🔬 DEVELOPMENT FIRMWARE FOR PID STABILIZATION INTEGRATION
+ *
  * Complete telemetry system with BME280, AHT21, GPS, and simulated advanced sensors
  * Compatible with remote control system (12-byte control, 22-byte telemetry)
+ *
+ * DEVELOPMENT FOCUS:
+ * - PID stabilization controller implementation
+ * - MPU6050 sensor fusion integration
+ * - Advanced flight modes development
+ * - Parameter tuning and optimization
+ *
+ * ⚠️ EXPERIMENTAL - FOR DEVELOPMENT USE ONLY
+ * Use stable_drone/droneFreeRTOS.ino for production flights
  *
  * FreeRTOS Task Architecture:
  * - SensorTask: Reads all sensors (1Hz for environmental, 10Hz for GPS)
  * - RadioTask: Handles RF24 communication (5Hz control reception, 1Hz telemetry transmission)
  * - StatusTask: Prints system status and diagnostics (0.1Hz)
+ * - MotorTask: ESC control with PID integration (50Hz) - DEVELOPMENT TARGET
  */
 
 #include <SPI.h>

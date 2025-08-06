@@ -1,7 +1,18 @@
 /*
- * Complete Remote Controller - Stable Non-FreeRTOS Version
+ * DEVELOPMENT VERSION - Complete Remote Controller - Stable Non-FreeRTOS Version
+ * 🔬 DEVELOPMENT FIRMWARE FOR ENHANCED CONTROL FEATURES
+ *
  * Reliable control at 200ms intervals (5Hz) for stable drone communication
  * Compatible with droneFreeRTOS.ino
+ *
+ * DEVELOPMENT FOCUS:
+ * - Advanced control modes and flight assistance
+ * - Real-time PID parameter tuning interface
+ * - Enhanced telemetry display and data logging
+ * - Flight mode switching and safety enhancements
+ *
+ * ⚠️ EXPERIMENTAL - FOR DEVELOPMENT USE ONLY
+ * Use stable_remote/remoteControllerStable.ino for production flights
  */
 
 #include <SPI.h>

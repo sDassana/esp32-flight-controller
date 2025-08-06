@@ -29,12 +29,17 @@ This project implements a sophisticated flight controller for a custom quadcopte
 
 ```
 esp32-flight-controller/
-├── 📁 firmware/              # Main firmware files
-│   ├── 📁 drone/             # Drone flight controller firmware
-│   │   └── droneFreeRTOS.ino # Current production firmware
-│   └── 📁 remote/            # Remote controller firmware
-│       ├── remoteControllerStable.ino  # Stable remote controller
-│       └── FastControlRemote.ino       # Alternative remote
+├── 📁 firmware/              # Firmware organized by stability
+│   ├── 📁 stable_drone/      # Production-ready drone firmware
+│   │   └── droneFreeRTOS.ino # ✅ Stable production firmware
+│   ├── 📁 stable_remote/     # Production-ready remote firmware
+│   │   ├── remoteControllerStable.ino  # ✅ Stable remote controller
+│   │   └── FastControlRemote.ino       # Alternative stable remote
+│   ├── 📁 development_drone/ # Development drone firmware
+│   │   └── droneFreeRTOS.ino # 🔬 Development version for PID integration
+│   └── 📁 development_remote/ # Development remote firmware
+│       ├── remoteControllerStable.ino  # 🔬 Development remote
+│       └── FastControlRemote.ino       # Alternative development remote
 │
 ├── 📁 docs/                  # Project documentation
 │   ├── PROJECT_PROGRESS.md   # Development progress tracking
@@ -331,13 +336,17 @@ git clone https://github.com/yourusername/esp32-flight-controller.git
 # Navigate to project directory
 cd esp32-flight-controller
 
-# For drone firmware
-cd firmware/drone
+# For stable drone firmware (production use)
+cd firmware/stable_drone
 # Upload droneFreeRTOS.ino using PlatformIO or Arduino IDE
 
-# For remote controller firmware
-cd ../remote
+# For stable remote controller firmware (production use)
+cd ../stable_remote
 # Upload remoteControllerStable.ino using PlatformIO or Arduino IDE
+
+# For development versions (experimental features)
+cd ../development_drone
+# Upload development firmware for PID integration work
 
 # Return to project root for PlatformIO builds
 cd ../../
@@ -347,12 +356,11 @@ pio run --target upload
 ### Quick Start Guide
 
 1. **Hardware Assembly** - Follow pin configuration tables for wiring
-2. **Firmware Upload** - Install drone and remote firmware from `firmware/` directory
-3. **Component Testing** - Use examples in `examples/` for individual component verification
-4. **System Integration** - Test complete system using tools in `tools/` directory
-5. **Documentation** - Refer to `docs/` for detailed progress and technical information
-
-## 🚀 Usage
+2. **Stable Firmware** - Use `firmware/stable_*` for production/flight operations
+3. **Development Firmware** - Use `firmware/development_*` for PID implementation and testing
+4. **Component Testing** - Use examples in `examples/` for individual component verification
+5. **System Integration** - Test complete system using tools in `tools/` directory
+6. **Documentation** - Refer to `docs/` for detailed progress and technical information## 🚀 Usage
 
 ### Initial Setup
 
@@ -403,14 +411,16 @@ For detailed progress tracking, see [docs/PROJECT_PROGRESS.md](docs/PROJECT_PROG
 
 ## 🗂️ Directory Navigation
 
-- **🚁 [firmware/](firmware/)** - Current production firmware for drone and remote
+- **🚁 [firmware/](firmware/)** - Stable and development firmware versions
+  - **✅ [stable_drone/](firmware/stable_drone/)** - Production-ready drone firmware
+  - **✅ [stable_remote/](firmware/stable_remote/)** - Production-ready remote firmware
+  - **🔬 [development_drone/](firmware/development_drone/)** - PID integration development
+  - **🔬 [development_remote/](firmware/development_remote/)** - Enhanced features development
 - **📚 [docs/](docs/)** - Complete project documentation and progress tracking
 - **🔬 [examples/](examples/)** - Sensor tests and component verification programs
 - **🛠️ [tools/](tools/)** - Development utilities and web dashboard
 - **🔌 [hardware/](hardware/)** - Hardware specifications and diagrams (planned)
-- **📦 [archive/](archive/)** - Legacy versions and deprecated implementations
-
-## 🤝 Contributing
+- **📦 [archive/](archive/)** - Legacy versions and deprecated implementations## 🤝 Contributing
 
 Contributions are welcome! Please read our contributing guidelines and submit pull requests for any improvements.
 
