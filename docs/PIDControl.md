@@ -8,10 +8,10 @@ This project implements a PID-based flight controller for a custom ESP32-powered
 
 | GPIO Pin | Motor Position | Rotation Direction      | Propeller Type | Status    |
 | -------- | -------------- | ----------------------- | -------------- | --------- |
-| GPIO 27  | Back Left      | Clockwise (CW)          | CW             | ✅ Active |
-| GPIO 14  | Front Left     | Counter-Clockwise (CCW) | CCW            | ✅ Active |
-| GPIO 12  | Back Right     | Counter-Clockwise (CCW) | CCW            | ✅ Active |
-| GPIO 13  | Front Right    | Clockwise (CW)          | CW             | ✅ Active |
+| GPIO 27  | Back Left      | Counter-Clockwise (CCW) | CCW            | ✅ Active |
+| GPIO 14  | Front Left     | Clockwise (CW)          | CW             | ✅ Active |
+| GPIO 12  | Back Right     | Clockwise (CW)          | CW             | ✅ Active |
+| GPIO 13  | Front Right    | Counter-Clockwise (CCW) | CCW            | ✅ Active |
 
 > ✅ **Current Status**: Motors are fully operational with RF remote control. ESC calibration occurs automatically on power-on. Toggle switch 1 arms/disarms motors, toggle switch 2 provides emergency stop.
 

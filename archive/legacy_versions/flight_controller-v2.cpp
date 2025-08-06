@@ -34,10 +34,10 @@ WebServer server(80);
 // Component Pins
 #define NRF_CE_PIN 4
 #define NRF_CSN_PIN 5
-#define ESC1_PIN 13 // Front Right (CW)
-#define ESC2_PIN 12 // Back Right (CCW)
-#define ESC3_PIN 14 // Front Left (CCW)
-#define ESC4_PIN 27 // Back Left (CW)
+#define ESC1_PIN 13 // Front Right (CCW)
+#define ESC2_PIN 12 // Back Right (CW)
+#define ESC3_PIN 14 // Front Left (CW)
+#define ESC4_PIN 27 // Back Left (CCW)
 #define LED_R1_PIN 25
 #define LED_G1_PIN 33
 #define LED_B1_PIN 32

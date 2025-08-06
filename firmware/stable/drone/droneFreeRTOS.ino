@@ -45,10 +45,10 @@
 #define GUVA_PIN 36 // GUVA-S12SD UV sensor
 
 // ESC Control Pins (PWM Outputs to Brushless Motors)
-#define ESC1_PIN 13 // Front Right
-#define ESC2_PIN 12 // Front Left
-#define ESC3_PIN 14 // Back Right
-#define ESC4_PIN 27 // Back Left
+#define ESC1_PIN 13 // Front Right (CCW)
+#define ESC2_PIN 12 // Back Right (CW)
+#define ESC3_PIN 14 // Front Left (CW)
+#define ESC4_PIN 27 // Back Left (CCW)
 
 // ESC PWM Configuration
 #define ESC_MIN_PULSE 1000 // Minimum pulse width (microseconds)
@@ -1146,10 +1146,10 @@ void motorTask(void *parameter)
         }
 
         // Write motor speeds to ESCs
-        esc1.writeMicroseconds(motorSpeeds[0]); // Front Right
-        esc2.writeMicroseconds(motorSpeeds[1]); // Front Left
-        esc3.writeMicroseconds(motorSpeeds[2]); // Back Right
-        esc4.writeMicroseconds(motorSpeeds[3]); // Back Left
+        esc1.writeMicroseconds(motorSpeeds[0]); // Front Right (CCW)
+        esc2.writeMicroseconds(motorSpeeds[1]); // Back Right (CW)
+        esc3.writeMicroseconds(motorSpeeds[2]); // Front Left (CW)
+        esc4.writeMicroseconds(motorSpeeds[3]); // Back Left (CCW)
 
         // Wait for next cycle
         vTaskDelayUntil(&xLastWakeTime, motorFrequency);
@@ -1220,15 +1220,15 @@ void calculateMotorSpeeds()
 
     // Quadcopter Motor Mixing
     // Standard X-configuration:
-    // Motor 1 (Front Right): +Throttle -Roll +Pitch -Yaw
-    // Motor 2 (Front Left):  +Throttle +Roll +Pitch +Yaw
-    // Motor 3 (Back Right):  +Throttle -Roll -Pitch +Yaw
-    // Motor 4 (Back Left):   +Throttle +Roll -Pitch -Yaw
+    // Motor 1 (Front Right CCW): +Throttle +Roll +Pitch -Yaw
+    // Motor 2 (Back Right CW):   +Throttle +Roll -Pitch +Yaw
+    // Motor 3 (Front Left CW):   +Throttle -Roll +Pitch +Yaw
+    // Motor 4 (Back Left CCW):   +Throttle -Roll -Pitch -Yaw
 
-    motorSpeeds[0] = baseThrottle - rollInput + pitchInput - yawInput; // Front Right
-    motorSpeeds[1] = baseThrottle + rollInput + pitchInput + yawInput; // Front Left
-    motorSpeeds[2] = baseThrottle - rollInput - pitchInput + yawInput; // Back Right
-    motorSpeeds[3] = baseThrottle + rollInput - pitchInput - yawInput; // Back Left
+    motorSpeeds[0] = baseThrottle + rollInput + pitchInput - yawInput; // Front Right (CCW)
+    motorSpeeds[1] = baseThrottle + rollInput - pitchInput + yawInput; // Back Right (CW)
+    motorSpeeds[2] = baseThrottle - rollInput + pitchInput + yawInput; // Front Left (CW)
+    motorSpeeds[3] = baseThrottle - rollInput - pitchInput - yawInput; // Back Left (CCW)
 
     // Constrain motor speeds to safe range
     for (int i = 0; i < 4; i++)

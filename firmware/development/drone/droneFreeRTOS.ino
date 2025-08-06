@@ -18,7 +18,12 @@
  * - SensorTask: Reads all sensors (1Hz for environmental, 10Hz for GPS)
  * - RadioTask: Handles RF24 communication (5Hz control reception, 1Hz telemetry transmission)
  * - StatusTask: Prints system status and diagnostics (0.1Hz)
- * - MotorTask: ESC control with PID integration (50Hz) - DEVELOPMENT TARGET
+ * - MotorTask: ESC control with PID integration (50Hz)
+ * - IMUTask: High-frequency IMU reading and calibration (100Hz)
+ * - PIDTask: PID control loop for stabilization (50Hz)
+ *
+ * NOTE: PID control is active but PID values are not transmitted in telemetry
+ * to keep telemetry focused on sensor data only.
  */
 
 #include <SPI.h>
@@ -34,6 +39,8 @@
 #include <freertos/task.h>
 #include <freertos/queue.h>
 #include <freertos/semphr.h>
+#include <Adafruit_MPU6050.h>
+#include <Adafruit_Sensor.h>
 
 // Pin Definitions
 #define CE_PIN 4
@@ -44,10 +51,10 @@
 #define GUVA_PIN 36 // GUVA-S12SD UV sensor
 
 // ESC Control Pins (PWM Outputs to Brushless Motors)
-#define ESC1_PIN 13 // Front Right
-#define ESC2_PIN 12 // Front Left
-#define ESC3_PIN 14 // Back Right
-#define ESC4_PIN 27 // Back Left
+#define ESC1_PIN 13 // Front Right (CCW)
+#define ESC2_PIN 12 // Back Right (CW)
+#define ESC3_PIN 14 // Front Left (CW)
+#define ESC4_PIN 27 // Back Left (CCW)
 
 // ESC PWM Configuration
 #define ESC_MIN_PULSE 1000 // Minimum pulse width (microseconds)
@@ -59,6 +66,57 @@
 #define BME280_ADDRESS 0x76
 #define BH1750_ADDRESS 0x23
 #define ENS160_ADDRESS 0x53
+#define MPU6050_ADDRESS 0x68
+
+// PID Control Configuration
+#define PID_LOOP_FREQUENCY 50                       // Hz - 50Hz PID loop for smooth control
+#define PID_LOOP_PERIOD (1000 / PID_LOOP_FREQUENCY) // ms
+
+// PID Output Limits
+#define PID_ROLL_PITCH_MAX 400 // ±400 microseconds for roll/pitch correction
+#define PID_YAW_MAX 200        // ±200 microseconds for yaw correction
+#define PID_ALTITUDE_MAX 300   // ±300 microseconds for altitude correction
+
+// ================================
+// PID TUNING PARAMETERS - Easy Adjustment Section
+// ================================
+// Roll PID Gains (Angle Stabilization)
+const double ROLL_KP = 2.5;  // Proportional gain - increase for faster response
+const double ROLL_KI = 0.1;  // Integral gain - increase to eliminate steady-state error
+const double ROLL_KD = 0.15; // Derivative gain - increase for more damping
+
+// Pitch PID Gains (Angle Stabilization)
+const double PITCH_KP = 2.5;  // Proportional gain - usually same as roll
+const double PITCH_KI = 0.1;  // Integral gain - usually same as roll
+const double PITCH_KD = 0.15; // Derivative gain - usually same as roll
+
+// Yaw PID Gains (Rate Control)
+const double YAW_KP = 1.0;  // Proportional gain - lower than roll/pitch
+const double YAW_KI = 0.05; // Integral gain - very small for yaw
+const double YAW_KD = 0.05; // Derivative gain - minimal for yaw
+
+// Altitude PID Gains (Position Control)
+const double ALT_KP = 1.5; // Proportional gain for altitude hold
+const double ALT_KI = 0.2; // Integral gain for altitude hold
+const double ALT_KD = 0.8; // Derivative gain for altitude hold
+
+// Advanced PID Parameters
+const double MAX_ANGLE = 30.0;     // Maximum roll/pitch angle (degrees)
+const double MAX_YAW_RATE = 180.0; // Maximum yaw rate (degrees/second)
+const double MAX_CLIMB_RATE = 2.0; // Maximum climb rate (m/s)
+
+// Filter Coefficients (0.0 to 1.0, higher = more filtering)
+const double ROLL_FILTER = 0.1;  // Derivative filter for roll
+const double PITCH_FILTER = 0.1; // Derivative filter for pitch
+const double YAW_FILTER = 0.15;  // Derivative filter for yaw (more filtering)
+const double ALT_FILTER = 0.05;  // Derivative filter for altitude
+
+// Setpoint Smoothing (0.0 to 1.0, lower = more smoothing)
+const double ROLL_SMOOTH = 0.05;  // Setpoint smoothing for roll
+const double PITCH_SMOOTH = 0.05; // Setpoint smoothing for pitch
+const double YAW_SMOOTH = 0.1;    // Setpoint smoothing for yaw
+const double ALT_SMOOTH = 0.02;   // Setpoint smoothing for altitude
+// ================================
 
 // Task stack sizes
 #define SENSOR_TASK_STACK 8192
@@ -79,6 +137,7 @@ Adafruit_AHTX0 aht;
 TinyGPSPlus gps;
 BH1750 lightMeter;
 ScioSense_ENS160 ens160;
+Adafruit_MPU6050 mpu6050;
 
 // ESC Servo objects
 Servo esc1, esc2, esc3, esc4;
@@ -114,11 +173,271 @@ struct TelemetryPacket
     uint16_t TVOC;       // Total VOC in ppb from ENS160
 };
 
+// Enhanced PID Controller Structure with Advanced Features
+struct PIDController
+{
+    double setpoint;
+    double smoothedSetpoint; // For setpoint smoothing
+    double input;
+    double filteredInput; // For derivative filtering
+    double output;
+    double kp, ki, kd;
+    double lastInput;
+    double lastFilteredInput;
+    double iTerm;
+    double outputMin, outputMax;
+    double iTermMin, iTermMax; // Separate integral limits for anti-windup
+    unsigned long lastTime;
+    bool enabled;
+
+    // Derivative filtering
+    double derivativeAlpha; // Low-pass filter coefficient for derivative
+
+    // Setpoint smoothing
+    double setpointAlpha; // Smoothing factor for setpoint changes
+
+    // Anti-windup flags
+    bool wasOutputSaturated;
+
+    void initialize(double p, double i, double d, double minOut, double maxOut)
+    {
+        kp = p;
+        ki = i;
+        kd = d;
+        outputMin = minOut;
+        outputMax = maxOut;
+
+        // Set integral limits to 50% of output range to prevent windup
+        double range = outputMax - outputMin;
+        iTermMin = outputMin + range * 0.25;
+        iTermMax = outputMax - range * 0.25;
+
+        lastInput = 0;
+        lastFilteredInput = 0;
+        filteredInput = 0;
+        iTerm = 0;
+        setpoint = 0;
+        smoothedSetpoint = 0;
+        lastTime = millis();
+        enabled = false;
+        wasOutputSaturated = false;
+
+        // Filter coefficients (higher = more filtering)
+        derivativeAlpha = 0.1; // 10% new, 90% old for derivative
+        setpointAlpha = 0.05;  // 5% new, 95% old for setpoint smoothing
+    }
+
+    double compute()
+    {
+        if (!enabled)
+            return 0;
+
+        unsigned long now = millis();
+        double dt = (double)(now - lastTime) / 1000.0; // Convert to seconds for proper units
+
+        // Only compute if sufficient time has passed (minimum 1ms)
+        if (dt < 0.001)
+            return output;
+
+        // Setpoint smoothing - gradual transition to new setpoint
+        smoothedSetpoint = smoothedSetpoint + setpointAlpha * (setpoint - smoothedSetpoint);
+
+        // Input filtering for derivative term
+        filteredInput = filteredInput + derivativeAlpha * (input - filteredInput);
+
+        double error = smoothedSetpoint - input;
+
+        // Proportional term
+        double pTerm = kp * error;
+
+        // Integral term with advanced anti-windup
+        // Only accumulate integral if output is not saturated OR error is helping to reduce saturation
+        bool shouldAccumulateIntegral = !wasOutputSaturated ||
+                                        (wasOutputSaturated && ((error > 0 && output <= outputMin) ||
+                                                                (error < 0 && output >= outputMax)));
+
+        if (shouldAccumulateIntegral && ki != 0.0)
+        {
+            iTerm += ki * error * dt;
+
+            // Clamp integral term to prevent windup
+            if (iTerm > iTermMax)
+                iTerm = iTermMax;
+            else if (iTerm < iTermMin)
+                iTerm = iTermMin;
+        }
+
+        // Derivative term with filtered input to reduce noise
+        double dInput = 0;
+        if (dt > 0)
+        {
+            dInput = (filteredInput - lastFilteredInput) / dt;
+        }
+        double dTerm = -kd * dInput; // Negative because we want to reduce rate of change
+
+        // Compute final output
+        double rawOutput = pTerm + iTerm + dTerm;
+
+        // Output saturation/clamping
+        output = rawOutput;
+        if (output > outputMax)
+        {
+            output = outputMax;
+            wasOutputSaturated = true;
+        }
+        else if (output < outputMin)
+        {
+            output = outputMin;
+            wasOutputSaturated = true;
+        }
+        else
+        {
+            wasOutputSaturated = false;
+        }
+
+        // Remember values for next iteration
+        lastInput = input;
+        lastFilteredInput = filteredInput;
+        lastTime = now;
+
+        return output;
+    }
+
+    void reset()
+    {
+        iTerm = 0;
+        lastInput = input;
+        lastFilteredInput = input;
+        filteredInput = input;
+        smoothedSetpoint = setpoint;
+        lastTime = millis();
+        wasOutputSaturated = false;
+    }
+
+    void setTunings(double p, double i, double d)
+    {
+        // Prevent negative gains
+        kp = (p < 0) ? 0 : p;
+        ki = (i < 0) ? 0 : i;
+        kd = (d < 0) ? 0 : d;
+    }
+
+    void setOutputLimits(double min, double max)
+    {
+        if (min >= max)
+            return; // Invalid limits
+
+        outputMin = min;
+        outputMax = max;
+
+        // Update integral limits
+        double range = outputMax - outputMin;
+        iTermMin = outputMin + range * 0.25;
+        iTermMax = outputMax - range * 0.25;
+
+        // Clamp current values if needed
+        if (iTerm > iTermMax)
+            iTerm = iTermMax;
+        else if (iTerm < iTermMin)
+            iTerm = iTermMin;
+
+        if (output > outputMax)
+            output = outputMax;
+        else if (output < outputMin)
+            output = outputMin;
+    }
+
+    void setDerivativeFilter(double alpha)
+    {
+        derivativeAlpha = constrain(alpha, 0.01, 1.0); // Limit to reasonable range
+    }
+
+    void setSetpointSmoothing(double alpha)
+    {
+        setpointAlpha = constrain(alpha, 0.01, 1.0); // Limit to reasonable range
+    }
+
+    void setIntegralLimits(double minPercent, double maxPercent)
+    {
+        double range = outputMax - outputMin;
+        iTermMin = outputMin + range * constrain(minPercent, 0.0, 0.5);
+        iTermMax = outputMax - range * constrain(maxPercent, 0.0, 0.5);
+    }
+
+    // Diagnostic functions
+    double getProportionalTerm() { return kp * (smoothedSetpoint - input); }
+    double getIntegralTerm() { return iTerm; }
+    double getDerivativeTerm() { return -kd * ((filteredInput - lastFilteredInput) * 1000.0 / max(1UL, millis() - lastTime)); }
+    bool isOutputSaturated() { return wasOutputSaturated; }
+    double getSmoothedSetpoint() { return smoothedSetpoint; }
+};
+
+// IMU Data Structure
+struct IMUData
+{
+    float roll, pitch, yaw;             // Euler angles in degrees
+    float rollRate, pitchRate, yawRate; // Angular velocities in deg/s
+    float accelX, accelY, accelZ;       // Accelerometer data in m/s²
+    float gyroX, gyroY, gyroZ;          // Gyroscope data in deg/s
+    float temperature;                  // IMU temperature
+    bool dataValid;                     // Data validity flag
+    unsigned long timestamp;            // Data timestamp
+};
+
+// Flight Mode Enumeration
+enum FlightMode
+{
+    FLIGHT_MODE_DISARMED = 0,
+    FLIGHT_MODE_MANUAL = 1,        // Direct stick control (no stabilization)
+    FLIGHT_MODE_STABILIZE = 2,     // Angle stabilization (default)
+    FLIGHT_MODE_ALTITUDE_HOLD = 3, // Stabilize + altitude hold
+    FLIGHT_MODE_POSITION_HOLD = 4  // Full GPS position hold
+};
+
+// Advanced PID Configuration Structure
+struct PIDConfig
+{
+    // Roll PID parameters (for roll stabilization)
+    double roll_kp = ROLL_KP;         // Proportional gain from constants
+    double roll_ki = ROLL_KI;         // Integral gain from constants
+    double roll_kd = ROLL_KD;         // Derivative gain from constants
+    double roll_filter = ROLL_FILTER; // Derivative filter coefficient
+    double roll_smooth = ROLL_SMOOTH; // Setpoint smoothing
+
+    // Pitch PID parameters (for pitch stabilization)
+    double pitch_kp = PITCH_KP;         // Proportional gain from constants
+    double pitch_ki = PITCH_KI;         // Integral gain from constants
+    double pitch_kd = PITCH_KD;         // Derivative gain from constants
+    double pitch_filter = PITCH_FILTER; // Derivative filter coefficient
+    double pitch_smooth = PITCH_SMOOTH; // Setpoint smoothing
+
+    // Yaw PID parameters (for yaw rate control)
+    double yaw_kp = YAW_KP;         // Proportional gain from constants
+    double yaw_ki = YAW_KI;         // Integral gain from constants
+    double yaw_kd = YAW_KD;         // Derivative gain from constants
+    double yaw_filter = YAW_FILTER; // More filtering for yaw (noisier)
+    double yaw_smooth = YAW_SMOOTH; // More smoothing for yaw commands
+
+    // Altitude PID parameters (for altitude hold)
+    double alt_kp = ALT_KP;         // Altitude hold proportional from constants
+    double alt_ki = ALT_KI;         // Integral gain from constants
+    double alt_kd = ALT_KD;         // Derivative gain from constants
+    double alt_filter = ALT_FILTER; // Light filtering for altitude
+    double alt_smooth = ALT_SMOOTH; // Gentle altitude setpoint changes
+
+    // Advanced tuning parameters
+    double max_angle = MAX_ANGLE;           // Maximum angle setpoint from constants
+    double max_yaw_rate = MAX_YAW_RATE;     // Maximum yaw rate from constants
+    double max_climb_rate = MAX_CLIMB_RATE; // Maximum climb rate from constants
+};
+
 // FreeRTOS Task Handles
 TaskHandle_t sensorTaskHandle = NULL;
 TaskHandle_t radioTaskHandle = NULL;
 TaskHandle_t statusTaskHandle = NULL;
 TaskHandle_t motorTaskHandle = NULL;
+TaskHandle_t imuTaskHandle = NULL;
+TaskHandle_t pidTaskHandle = NULL;
 
 // FreeRTOS Synchronization
 SemaphoreHandle_t i2cMutex;
@@ -158,6 +477,40 @@ unsigned long sensorTaskCounter = 0;
 unsigned long radioTaskCounter = 0;
 unsigned long statusTaskCounter = 0;
 
+// PID Controllers and IMU Data
+PIDController rollPID, pitchPID, yawPID, altitudePID;
+PIDConfig pidConfig;
+IMUData imuData;
+FlightMode currentFlightMode = FLIGHT_MODE_DISARMED;
+
+// IMU Calibration Data
+struct IMUCalibration
+{
+    float rollOffset = 0.0;
+    float pitchOffset = 0.0;
+    float yawOffset = 0.0;
+    float gyroXOffset = 0.0;
+    float gyroYOffset = 0.0;
+    float gyroZOffset = 0.0;
+    bool calibrated = false;
+    int calibrationSamples = 0;
+} imuCalibration;
+
+// PID and Flight Control Variables
+bool pidEnabled = false;
+bool imuInitialized = false;
+float targetAltitude = 0.0;          // Target altitude for altitude hold mode
+float baseThrottleForHover = 1400.0; // Base throttle for hovering (will be auto-adjusted)
+unsigned long lastPIDUpdate = 0;
+SemaphoreHandle_t pidMutex;
+SemaphoreHandle_t imuMutex;
+
+// Enhanced motor control with PID integration
+volatile float pidRollOutput = 0.0;
+volatile float pidPitchOutput = 0.0;
+volatile float pidYawOutput = 0.0;
+volatile float pidAltitudeOutput = 0.0;
+
 void setup()
 {
     Serial.begin(115200);
@@ -186,8 +539,11 @@ void setup()
     telemetryMutex = xSemaphoreCreateMutex();
     serialMutex = xSemaphoreCreateMutex();
     controlMutex = xSemaphoreCreateMutex();
+    pidMutex = xSemaphoreCreateMutex();
+    imuMutex = xSemaphoreCreateMutex();
 
-    if (i2cMutex == NULL || telemetryMutex == NULL || serialMutex == NULL || controlMutex == NULL)
+    if (i2cMutex == NULL || telemetryMutex == NULL || serialMutex == NULL ||
+        controlMutex == NULL || pidMutex == NULL || imuMutex == NULL)
     {
         Serial.println("ERROR: Failed to create mutexes!");
         while (1)
@@ -196,6 +552,9 @@ void setup()
 
     // Initialize real sensors
     initializeRealSensors();
+
+    // Initialize IMU and PID controllers
+    initializeIMUAndPID();
 
     // Initialize radio with PROVEN configuration
     initializeRadio();
@@ -246,8 +605,31 @@ void setup()
         1 // Core 1 - dedicated core for motor control
     );
 
+    // Create IMU Task (high frequency sensor reading)
+    xTaskCreatePinnedToCore(
+        imuTask,
+        "IMUTask",
+        4096,
+        NULL,
+        5, // Highest priority for IMU reading
+        &imuTaskHandle,
+        0 // Core 0
+    );
+
+    // Create PID Task (control loop)
+    xTaskCreatePinnedToCore(
+        pidControlTask,
+        "PIDTask",
+        4096,
+        NULL,
+        4, // High priority for PID control
+        &pidTaskHandle,
+        1 // Core 1 with motor task
+    );
+
     // Check if tasks were created successfully
-    if (sensorTaskHandle == NULL || radioTaskHandle == NULL || statusTaskHandle == NULL || motorTaskHandle == NULL)
+    if (sensorTaskHandle == NULL || radioTaskHandle == NULL || statusTaskHandle == NULL ||
+        motorTaskHandle == NULL || imuTaskHandle == NULL || pidTaskHandle == NULL)
     {
         Serial.println("ERROR: Failed to create FreeRTOS tasks!");
         while (1)
@@ -1026,16 +1408,74 @@ void printStatus()
 
     bool controlActive = (millis() - lastControl) < 3000;
 
-    Serial.print("Drone status [FreeRTOS] - Running ");
+    Serial.print("Drone status [FreeRTOS+PID] - Running ");
     Serial.print(uptime);
     Serial.print("s, Control packets: ");
     Serial.print(packets);
     Serial.print(", Active: ");
     Serial.print(controlActive ? "YES" : "NO");
+
+    // Flight mode and motor status
+    Serial.print(", Mode: ");
+    switch (currentFlightMode)
+    {
+    case FLIGHT_MODE_DISARMED:
+        Serial.print("DISARMED");
+        break;
+    case FLIGHT_MODE_MANUAL:
+        Serial.print("MANUAL");
+        break;
+    case FLIGHT_MODE_STABILIZE:
+        Serial.print("STABILIZE");
+        break;
+    case FLIGHT_MODE_ALTITUDE_HOLD:
+        Serial.print("ALT_HOLD");
+        break;
+    case FLIGHT_MODE_POSITION_HOLD:
+        Serial.print("POS_HOLD");
+        break;
+    default:
+        Serial.print("UNKNOWN");
+        break;
+    }
+
     Serial.print(", Motors: ");
     Serial.print(motorsArmed ? "ARMED" : "DISARMED");
     if (emergencyStop)
         Serial.print(" [E-STOP]");
+
+    // IMU Status
+    Serial.print(", IMU: ");
+    if (imuInitialized && imuCalibration.calibrated)
+    {
+        if (xSemaphoreTake(imuMutex, pdMS_TO_TICKS(50)) == pdTRUE)
+        {
+            Serial.print("OK [R:");
+            Serial.print(imuData.roll, 1);
+            Serial.print("° P:");
+            Serial.print(imuData.pitch, 1);
+            Serial.print("° Y:");
+            Serial.print(imuData.yaw, 1);
+            Serial.print("°]");
+            xSemaphoreGive(imuMutex);
+        }
+    }
+    else if (imuInitialized && !imuCalibration.calibrated)
+    {
+        Serial.print("CALIBRATING(");
+        Serial.print(imuCalibration.calibrationSamples);
+        Serial.print("/500)");
+    }
+    else
+    {
+        Serial.print("FAILED");
+    }
+
+    // PID Status (simplified - just enabled/disabled)
+    Serial.print(", PID: ");
+    Serial.print(pidEnabled ? "ENABLED" : "DISABLED");
+
+    // Environmental sensors
     Serial.print(", Sensors: Temp:");
     Serial.print(currentTelemetry.temperature / 100.0);
     Serial.print("°C Hum:");
@@ -1145,17 +1585,17 @@ void motorTask(void *parameter)
         }
 
         // Write motor speeds to ESCs
-        esc1.writeMicroseconds(motorSpeeds[0]); // Front Right
-        esc2.writeMicroseconds(motorSpeeds[1]); // Front Left
-        esc3.writeMicroseconds(motorSpeeds[2]); // Back Right
-        esc4.writeMicroseconds(motorSpeeds[3]); // Back Left
+        esc1.writeMicroseconds(motorSpeeds[0]); // Front Right (CCW)
+        esc2.writeMicroseconds(motorSpeeds[1]); // Back Right (CW)
+        esc3.writeMicroseconds(motorSpeeds[2]); // Front Left (CW)
+        esc4.writeMicroseconds(motorSpeeds[3]); // Back Left (CCW)
 
         // Wait for next cycle
         vTaskDelayUntil(&xLastWakeTime, motorFrequency);
     }
 }
 
-// Calculate Motor Speeds from Control Inputs
+// Calculate Motor Speeds from Control Inputs with PID Integration
 void calculateMotorSpeeds()
 {
     // Check emergency stop (toggle switch 2)
@@ -1179,24 +1619,6 @@ void calculateMotorSpeeds()
         emergencyStop = false;
     }
 
-    // Map joystick inputs (±3000 range) to motor control values
-    // Note: The remote now uses ±3000 range for reduced sensitivity
-
-    // Convert control inputs to standard range (-500 to +500 for mixing)
-    int throttleInput = map(receivedControl.throttle, -3000, 3000, -500, 500);
-    int rollInput = map(receivedControl.roll, -3000, 3000, -500, 500);
-    int pitchInput = map(receivedControl.pitch, -3000, 3000, -500, 500);
-    int yawInput = map(receivedControl.yaw, -3000, 3000, -500, 500);
-
-    // Base throttle (center stick should be minimum safe throttle)
-    int baseThrottle = ESC_ARM_PULSE;
-
-    // Only add throttle if stick is above center (for safety)
-    if (throttleInput > 0)
-    {
-        baseThrottle += map(throttleInput, 0, 500, 0, 400); // Max 400 additional pulse width
-    }
-
     // Check if motors should be armed (toggle switch 1 controls arming)
     if (receivedControl.toggle1 == 1 && !emergencyStop)
     {
@@ -1217,17 +1639,58 @@ void calculateMotorSpeeds()
         return;
     }
 
-    // Quadcopter Motor Mixing
-    // Standard X-configuration:
-    // Motor 1 (Front Right): +Throttle -Roll +Pitch -Yaw
-    // Motor 2 (Front Left):  +Throttle +Roll +Pitch +Yaw
-    // Motor 3 (Back Right):  +Throttle -Roll -Pitch +Yaw
-    // Motor 4 (Back Left):   +Throttle +Roll -Pitch -Yaw
+    // Convert throttle input to base throttle value
+    int throttleInput = map(receivedControl.throttle, -3000, 3000, -500, 500);
+    int baseThrottle = ESC_ARM_PULSE;
 
-    motorSpeeds[0] = baseThrottle - rollInput + pitchInput - yawInput; // Front Right
-    motorSpeeds[1] = baseThrottle + rollInput + pitchInput + yawInput; // Front Left
-    motorSpeeds[2] = baseThrottle - rollInput - pitchInput + yawInput; // Back Right
-    motorSpeeds[3] = baseThrottle + rollInput - pitchInput - yawInput; // Back Left
+    // Only add throttle if stick is above center (for safety)
+    if (throttleInput > 0)
+    {
+        baseThrottle += map(throttleInput, 0, 500, 0, 400); // Max 400 additional pulse width
+    }
+
+    // Get PID outputs (thread-safe)
+    float rollCorrection = 0.0, pitchCorrection = 0.0, yawCorrection = 0.0, altitudeCorrection = 0.0;
+    if (xSemaphoreTake(pidMutex, pdMS_TO_TICKS(5)) == pdTRUE)
+    {
+        rollCorrection = pidRollOutput;
+        pitchCorrection = pidPitchOutput;
+        yawCorrection = pidYawOutput;
+        altitudeCorrection = pidAltitudeOutput;
+        xSemaphoreGive(pidMutex);
+    }
+
+    // Motor mixing based on flight mode
+    if (currentFlightMode == FLIGHT_MODE_MANUAL)
+    {
+        // Manual mode - direct stick control (no PID)
+        int rollInput = map(receivedControl.roll, -3000, 3000, -200, 200); // Reduced range for manual
+        int pitchInput = map(receivedControl.pitch, -3000, 3000, -200, 200);
+        int yawInput = map(receivedControl.yaw, -3000, 3000, -150, 150);
+
+        // Standard X-configuration mixing
+        motorSpeeds[0] = baseThrottle + rollInput + pitchInput - yawInput; // Front Right (CCW)
+        motorSpeeds[1] = baseThrottle + rollInput - pitchInput + yawInput; // Back Right (CW)
+        motorSpeeds[2] = baseThrottle - rollInput + pitchInput + yawInput; // Front Left (CW)
+        motorSpeeds[3] = baseThrottle - rollInput - pitchInput - yawInput; // Back Left (CCW)
+    }
+    else if (currentFlightMode >= FLIGHT_MODE_STABILIZE)
+    {
+        // Stabilized mode - use PID corrections
+        // Apply altitude correction to base throttle if in altitude hold mode
+        float adjustedBaseThrottle = baseThrottle;
+        if (currentFlightMode >= FLIGHT_MODE_ALTITUDE_HOLD)
+        {
+            adjustedBaseThrottle += altitudeCorrection;
+        }
+
+        // Apply PID corrections to motor mixing
+        // Standard X-configuration with PID corrections
+        motorSpeeds[0] = adjustedBaseThrottle + rollCorrection + pitchCorrection - yawCorrection; // Front Right (CCW)
+        motorSpeeds[1] = adjustedBaseThrottle + rollCorrection - pitchCorrection + yawCorrection; // Back Right (CW)
+        motorSpeeds[2] = adjustedBaseThrottle - rollCorrection + pitchCorrection + yawCorrection; // Front Left (CW)
+        motorSpeeds[3] = adjustedBaseThrottle - rollCorrection - pitchCorrection - yawCorrection; // Back Left (CCW)
+    }
 
     // Constrain motor speeds to safe range
     for (int i = 0; i < 4; i++)
@@ -1235,36 +1698,582 @@ void calculateMotorSpeeds()
         motorSpeeds[i] = constrain(motorSpeeds[i], ESC_ARM_PULSE, ESC_MAX_PULSE);
     }
 
-    // Debug output (less frequent to avoid overwhelming serial)
+    // Enhanced debug output with PID information (less frequent to avoid overwhelming serial)
     static unsigned long lastMotorDebug = 0;
-    if (millis() - lastMotorDebug > 1000) // Every 1 second
+    if (millis() - lastMotorDebug > 2000) // Every 2 seconds
     {
         if (xSemaphoreTake(serialMutex, pdMS_TO_TICKS(50)) == pdTRUE)
         {
-            Serial.print("Motors [Armed:");
+            Serial.print("Mode:");
+            switch (currentFlightMode)
+            {
+            case FLIGHT_MODE_DISARMED:
+                Serial.print("DISARMED");
+                break;
+            case FLIGHT_MODE_MANUAL:
+                Serial.print("MANUAL");
+                break;
+            case FLIGHT_MODE_STABILIZE:
+                Serial.print("STABILIZE");
+                break;
+            case FLIGHT_MODE_ALTITUDE_HOLD:
+                Serial.print("ALT_HOLD");
+                break;
+            default:
+                Serial.print("UNKNOWN");
+                break;
+            }
+
+            Serial.print(" [Armed:");
             Serial.print(motorsArmed ? "YES" : "NO");
-            Serial.print(", SW1:");
-            Serial.print(receivedControl.toggle1 ? "ARM" : "DISARM");
-            Serial.print(", SW2:");
-            Serial.print(receivedControl.toggle2 ? "ESTOP" : "OK");
             Serial.print("] T:");
             Serial.print(throttleInput);
-            Serial.print(" R:");
-            Serial.print(rollInput);
-            Serial.print(" P:");
-            Serial.print(pitchInput);
-            Serial.print(" Y:");
-            Serial.print(yawInput);
-            Serial.print(" -> M1:");
+
+            if (currentFlightMode >= FLIGHT_MODE_STABILIZE && imuData.dataValid)
+            {
+                Serial.print(" | IMU R:");
+                Serial.print(imuData.roll, 1);
+                Serial.print(" P:");
+                Serial.print(imuData.pitch, 1);
+                Serial.print(" Y:");
+                Serial.print(imuData.yaw, 1);
+            }
+
+            Serial.print(" | Motors:");
             Serial.print(motorSpeeds[0]);
-            Serial.print(" M2:");
+            Serial.print(",");
             Serial.print(motorSpeeds[1]);
-            Serial.print(" M3:");
+            Serial.print(",");
             Serial.print(motorSpeeds[2]);
-            Serial.print(" M4:");
+            Serial.print(",");
             Serial.println(motorSpeeds[3]);
             xSemaphoreGive(serialMutex);
         }
         lastMotorDebug = millis();
     }
+}
+
+// ================================
+// PID AND IMU CONTROL FUNCTIONS
+// ================================
+
+// Initialize IMU and PID Controllers
+void initializeIMUAndPID()
+{
+    if (xSemaphoreTake(serialMutex, pdMS_TO_TICKS(1000)) == pdTRUE)
+    {
+        Serial.println("Initializing MPU6050 IMU and PID controllers...");
+        xSemaphoreGive(serialMutex);
+    }
+
+    // Initialize MPU6050
+    if (xSemaphoreTake(i2cMutex, pdMS_TO_TICKS(2000)) == pdTRUE)
+    {
+        if (mpu6050.begin(MPU6050_ADDRESS))
+        {
+            // Configure MPU6050 for optimal performance
+            mpu6050.setAccelerometerRange(MPU6050_RANGE_8_G); // ±8g range
+            mpu6050.setGyroRange(MPU6050_RANGE_500_DEG);      // ±500°/s range
+            mpu6050.setFilterBandwidth(MPU6050_BAND_21_HZ);   // 21Hz low-pass filter
+
+            imuInitialized = true;
+
+            if (xSemaphoreTake(serialMutex, pdMS_TO_TICKS(100)) == pdTRUE)
+            {
+                Serial.println("✓ MPU6050 initialized successfully");
+                xSemaphoreGive(serialMutex);
+            }
+        }
+        else
+        {
+            if (xSemaphoreTake(serialMutex, pdMS_TO_TICKS(100)) == pdTRUE)
+            {
+                Serial.println("✗ MPU6050 initialization failed - PID disabled");
+                xSemaphoreGive(serialMutex);
+            }
+            imuInitialized = false;
+        }
+        xSemaphoreGive(i2cMutex);
+    }
+
+    // Initialize PID controllers with advanced features
+    rollPID.initialize(pidConfig.roll_kp, pidConfig.roll_ki, pidConfig.roll_kd,
+                       -PID_ROLL_PITCH_MAX, PID_ROLL_PITCH_MAX);
+    rollPID.setDerivativeFilter(pidConfig.roll_filter);
+    rollPID.setSetpointSmoothing(pidConfig.roll_smooth);
+    rollPID.setIntegralLimits(0.2, 0.2); // 20% of output range for integral
+
+    pitchPID.initialize(pidConfig.pitch_kp, pidConfig.pitch_ki, pidConfig.pitch_kd,
+                        -PID_ROLL_PITCH_MAX, PID_ROLL_PITCH_MAX);
+    pitchPID.setDerivativeFilter(pidConfig.pitch_filter);
+    pitchPID.setSetpointSmoothing(pidConfig.pitch_smooth);
+    pitchPID.setIntegralLimits(0.2, 0.2); // 20% of output range for integral
+
+    yawPID.initialize(pidConfig.yaw_kp, pidConfig.yaw_ki, pidConfig.yaw_kd,
+                      -PID_YAW_MAX, PID_YAW_MAX);
+    yawPID.setDerivativeFilter(pidConfig.yaw_filter);
+    yawPID.setSetpointSmoothing(pidConfig.yaw_smooth);
+    yawPID.setIntegralLimits(0.15, 0.15); // 15% of output range for yaw integral
+
+    altitudePID.initialize(pidConfig.alt_kp, pidConfig.alt_ki, pidConfig.alt_kd,
+                           -PID_ALTITUDE_MAX, PID_ALTITUDE_MAX);
+    altitudePID.setDerivativeFilter(pidConfig.alt_filter);
+    altitudePID.setSetpointSmoothing(pidConfig.alt_smooth);
+    altitudePID.setIntegralLimits(0.3, 0.3); // 30% of output range for altitude integral    // Initialize IMU data structure
+    imuData.dataValid = false;
+    imuData.timestamp = 0;
+
+    if (xSemaphoreTake(serialMutex, pdMS_TO_TICKS(100)) == pdTRUE)
+    {
+        Serial.println("✓ PID controllers initialized");
+        if (imuInitialized)
+        {
+            Serial.println("✓ Starting IMU calibration...");
+        }
+        xSemaphoreGive(serialMutex);
+    }
+}
+
+// IMU Task - High frequency IMU reading (100Hz)
+void imuTask(void *parameter)
+{
+    TickType_t xLastWakeTime = xTaskGetTickCount();
+    const TickType_t imuFrequency = pdMS_TO_TICKS(10); // 100Hz IMU reading
+
+    // Calibration variables
+    const int CALIBRATION_SAMPLES = 500; // 5 seconds of calibration at 100Hz
+    float gyroXSum = 0, gyroYSum = 0, gyroZSum = 0;
+    float rollSum = 0, pitchSum = 0;
+
+    for (;;)
+    {
+        if (imuInitialized && xSemaphoreTake(i2cMutex, pdMS_TO_TICKS(5)) == pdTRUE)
+        {
+            sensors_event_t accel, gyro, temp;
+            bool readSuccess = mpu6050.getEvent(&accel, &gyro, &temp);
+            xSemaphoreGive(i2cMutex);
+
+            if (readSuccess && xSemaphoreTake(imuMutex, pdMS_TO_TICKS(5)) == pdTRUE)
+            {
+                // Raw sensor data
+                imuData.accelX = accel.acceleration.x;
+                imuData.accelY = accel.acceleration.y;
+                imuData.accelZ = accel.acceleration.z;
+                imuData.gyroX = gyro.gyro.x * 180.0 / PI; // Convert to deg/s
+                imuData.gyroY = gyro.gyro.y * 180.0 / PI;
+                imuData.gyroZ = gyro.gyro.z * 180.0 / PI;
+                imuData.temperature = temp.temperature;
+
+                // Calculate roll and pitch from accelerometer
+                float roll_acc = atan2(imuData.accelY, imuData.accelZ) * 180.0 / PI;
+                float pitch_acc = atan2(-imuData.accelX, sqrt(imuData.accelY * imuData.accelY + imuData.accelZ * imuData.accelZ)) * 180.0 / PI;
+
+                // Calibration phase
+                if (!imuCalibration.calibrated)
+                {
+                    if (imuCalibration.calibrationSamples < CALIBRATION_SAMPLES)
+                    {
+                        gyroXSum += imuData.gyroX;
+                        gyroYSum += imuData.gyroY;
+                        gyroZSum += imuData.gyroZ;
+                        rollSum += roll_acc;
+                        pitchSum += pitch_acc;
+                        imuCalibration.calibrationSamples++;
+                    }
+                    else
+                    {
+                        // Calculate offsets
+                        imuCalibration.gyroXOffset = gyroXSum / CALIBRATION_SAMPLES;
+                        imuCalibration.gyroYOffset = gyroYSum / CALIBRATION_SAMPLES;
+                        imuCalibration.gyroZOffset = gyroZSum / CALIBRATION_SAMPLES;
+                        imuCalibration.rollOffset = rollSum / CALIBRATION_SAMPLES;
+                        imuCalibration.pitchOffset = pitchSum / CALIBRATION_SAMPLES;
+                        imuCalibration.calibrated = true;
+
+                        // Initialize complementary filter with calibrated values
+                        imuData.roll = 0.0;  // Start level
+                        imuData.pitch = 0.0; // Start level
+                        imuData.yaw = 0.0;   // Start at 0
+
+                        if (xSemaphoreTake(serialMutex, pdMS_TO_TICKS(100)) == pdTRUE)
+                        {
+                            Serial.println("✓ IMU calibration complete!");
+                            Serial.printf("Gyro offsets - X: %.2f, Y: %.2f, Z: %.2f deg/s\n",
+                                          imuCalibration.gyroXOffset, imuCalibration.gyroYOffset, imuCalibration.gyroZOffset);
+                            Serial.printf("Level offsets - Roll: %.2f, Pitch: %.2f degrees\n",
+                                          imuCalibration.rollOffset, imuCalibration.pitchOffset);
+                            xSemaphoreGive(serialMutex);
+                        }
+                    }
+                }
+                else
+                {
+                    // Apply calibration offsets
+                    float gyroXCal = imuData.gyroX - imuCalibration.gyroXOffset;
+                    float gyroYCal = imuData.gyroY - imuCalibration.gyroYOffset;
+                    float gyroZCal = imuData.gyroZ - imuCalibration.gyroZOffset;
+                    float rollAccCal = roll_acc - imuCalibration.rollOffset;
+                    float pitchAccCal = pitch_acc - imuCalibration.pitchOffset;
+
+                    // Complementary filter for stable angle estimation
+                    // 98% gyro integration + 2% accelerometer correction
+                    float dt = 0.01; // 10ms loop time
+                    float alpha = 0.98;
+
+                    imuData.roll = alpha * (imuData.roll + gyroXCal * dt) + (1.0 - alpha) * rollAccCal;
+                    imuData.pitch = alpha * (imuData.pitch + gyroYCal * dt) + (1.0 - alpha) * pitchAccCal;
+                    imuData.yaw += gyroZCal * dt; // Pure integration for yaw
+
+                    // Store calibrated angular rates
+                    imuData.rollRate = gyroXCal;
+                    imuData.pitchRate = gyroYCal;
+                    imuData.yawRate = gyroZCal;
+
+                    imuData.dataValid = true;
+                    imuData.timestamp = millis();
+                }
+
+                xSemaphoreGive(imuMutex);
+            }
+        }
+
+        // Wait for next cycle
+        vTaskDelayUntil(&xLastWakeTime, imuFrequency);
+    }
+}
+
+// PID Control Task - Runs at 50Hz for smooth control
+void pidControlTask(void *parameter)
+{
+    TickType_t xLastWakeTime = xTaskGetTickCount();
+    const TickType_t pidFrequency = pdMS_TO_TICKS(PID_LOOP_PERIOD); // 50Hz PID loop
+
+    for (;;)
+    {
+        if (imuCalibration.calibrated && imuData.dataValid && pidEnabled)
+        {
+            if (xSemaphoreTake(imuMutex, pdMS_TO_TICKS(5)) == pdTRUE &&
+                xSemaphoreTake(controlMutex, pdMS_TO_TICKS(5)) == pdTRUE &&
+                xSemaphoreTake(pidMutex, pdMS_TO_TICKS(5)) == pdTRUE)
+            {
+                // Determine flight mode and setpoints
+                updateFlightMode();
+
+                if (currentFlightMode >= FLIGHT_MODE_STABILIZE)
+                {
+                    // Convert control inputs to angle setpoints with limits and smoothing
+                    // Apply maximum angle limits for safety
+                    float rollSetpointRaw = map(receivedControl.roll, -3000, 3000,
+                                                -pidConfig.max_angle, pidConfig.max_angle);
+                    float pitchSetpointRaw = map(receivedControl.pitch, -3000, 3000,
+                                                 -pidConfig.max_angle, pidConfig.max_angle);
+
+                    // Constrain to safe limits
+                    rollPID.setpoint = constrain(rollSetpointRaw, -pidConfig.max_angle, pidConfig.max_angle);
+                    pitchPID.setpoint = constrain(pitchSetpointRaw, -pidConfig.max_angle, pidConfig.max_angle);
+
+                    // Yaw is rate control (deg/s), not angle - apply rate limits
+                    float yawRateSetpointRaw = map(receivedControl.yaw, -3000, 3000,
+                                                   -pidConfig.max_yaw_rate, pidConfig.max_yaw_rate);
+                    yawPID.setpoint = constrain(yawRateSetpointRaw, -pidConfig.max_yaw_rate, pidConfig.max_yaw_rate);
+
+                    // Set current IMU readings as PID inputs
+                    rollPID.input = imuData.roll;
+                    pitchPID.input = imuData.pitch;
+                    yawPID.input = imuData.yawRate; // Rate control for yaw
+
+                    // Enable PID controllers
+                    rollPID.enabled = true;
+                    pitchPID.enabled = true;
+                    yawPID.enabled = true;
+
+                    // Compute PID outputs
+                    pidRollOutput = rollPID.compute();
+                    pidPitchOutput = pitchPID.compute();
+                    pidYawOutput = yawPID.compute();
+
+                    // Altitude hold mode with climb rate limiting
+                    if (currentFlightMode >= FLIGHT_MODE_ALTITUDE_HOLD)
+                    {
+                        // Use pressure altitude for altitude hold
+                        altitudePID.input = getFilteredAltitude();
+                        altitudePID.enabled = true;
+
+                        // Limit altitude changes to reasonable climb rate
+                        float altitudeError = altitudePID.setpoint - altitudePID.input;
+                        float maxAltitudeChange = pidConfig.max_climb_rate * (PID_LOOP_PERIOD / 1000.0);
+
+                        if (abs(altitudeError) > maxAltitudeChange)
+                        {
+                            // Gradually approach target altitude
+                            if (altitudeError > 0)
+                                altitudePID.setpoint = altitudePID.input + maxAltitudeChange;
+                            else
+                                altitudePID.setpoint = altitudePID.input - maxAltitudeChange;
+                        }
+
+                        pidAltitudeOutput = altitudePID.compute();
+                    }
+                    else
+                    {
+                        altitudePID.enabled = false;
+                        pidAltitudeOutput = 0.0;
+                    }
+                }
+                else
+                {
+                    // Manual mode - disable all PID controllers
+                    rollPID.enabled = false;
+                    pitchPID.enabled = false;
+                    yawPID.enabled = false;
+                    altitudePID.enabled = false;
+
+                    pidRollOutput = 0.0;
+                    pidPitchOutput = 0.0;
+                    pidYawOutput = 0.0;
+                    pidAltitudeOutput = 0.0;
+                }
+
+                xSemaphoreGive(pidMutex);
+                xSemaphoreGive(controlMutex);
+                xSemaphoreGive(imuMutex);
+
+                // Enhanced debugging output every 100 cycles (2 seconds at 50Hz)
+                static int debugCounter = 0;
+                if (++debugCounter >= 100)
+                {
+                    debugCounter = 0;
+
+                    if (enableVerboseLogging && currentFlightMode >= FLIGHT_MODE_STABILIZE)
+                    {
+                        if (xSemaphoreTake(serialMutex, pdMS_TO_TICKS(50)) == pdTRUE)
+                        {
+                            // PID diagnostic information
+                            Serial.print("PID Diagnostics - Mode: ");
+                            Serial.print(currentFlightMode);
+                            Serial.println();
+
+                            // Roll axis diagnostics
+                            Serial.print("  Roll: SP=");
+                            Serial.print(rollPID.setpoint, 1);
+                            Serial.print(" IN=");
+                            Serial.print(rollPID.input, 1);
+                            Serial.print(" OUT=");
+                            Serial.print(pidRollOutput, 1);
+                            Serial.print(" [P=");
+                            Serial.print(rollPID.proportional_term, 1);
+                            Serial.print(" I=");
+                            Serial.print(rollPID.integral_term, 1);
+                            Serial.print(" D=");
+                            Serial.print(rollPID.derivative_term, 1);
+                            Serial.print("]");
+                            if (rollPID.output_saturated)
+                                Serial.print(" SAT");
+                            if (rollPID.integral_saturated)
+                                Serial.print(" I-SAT");
+                            Serial.println();
+
+                            // Pitch axis diagnostics
+                            Serial.print("  Pitch: SP=");
+                            Serial.print(pitchPID.setpoint, 1);
+                            Serial.print(" IN=");
+                            Serial.print(pitchPID.input, 1);
+                            Serial.print(" OUT=");
+                            Serial.print(pidPitchOutput, 1);
+                            Serial.print(" [P=");
+                            Serial.print(pitchPID.proportional_term, 1);
+                            Serial.print(" I=");
+                            Serial.print(pitchPID.integral_term, 1);
+                            Serial.print(" D=");
+                            Serial.print(pitchPID.derivative_term, 1);
+                            Serial.print("]");
+                            if (pitchPID.output_saturated)
+                                Serial.print(" SAT");
+                            if (pitchPID.integral_saturated)
+                                Serial.print(" I-SAT");
+                            Serial.println();
+
+                            // Yaw axis diagnostics (rate control)
+                            Serial.print("  Yaw: SP=");
+                            Serial.print(yawPID.setpoint, 1);
+                            Serial.print(" IN=");
+                            Serial.print(yawPID.input, 1);
+                            Serial.print(" OUT=");
+                            Serial.print(pidYawOutput, 1);
+                            Serial.print(" [P=");
+                            Serial.print(yawPID.proportional_term, 1);
+                            Serial.print(" I=");
+                            Serial.print(yawPID.integral_term, 1);
+                            Serial.print(" D=");
+                            Serial.print(yawPID.derivative_term, 1);
+                            Serial.print("]");
+                            if (yawPID.output_saturated)
+                                Serial.print(" SAT");
+                            if (yawPID.integral_saturated)
+                                Serial.print(" I-SAT");
+                            Serial.println();
+
+                            // Altitude diagnostics if in altitude hold
+                            if (currentFlightMode >= FLIGHT_MODE_ALTITUDE_HOLD)
+                            {
+                                Serial.print("  Alt: SP=");
+                                Serial.print(altitudePID.setpoint, 2);
+                                Serial.print(" IN=");
+                                Serial.print(altitudePID.input, 2);
+                                Serial.print(" OUT=");
+                                Serial.print(pidAltitudeOutput, 1);
+                                Serial.print(" [P=");
+                                Serial.print(altitudePID.proportional_term, 1);
+                                Serial.print(" I=");
+                                Serial.print(altitudePID.integral_term, 1);
+                                Serial.print(" D=");
+                                Serial.print(altitudePID.derivative_term, 1);
+                                Serial.print("]");
+                                if (altitudePID.output_saturated)
+                                    Serial.print(" SAT");
+                                if (altitudePID.integral_saturated)
+                                    Serial.print(" I-SAT");
+                                Serial.println();
+                            }
+
+                            Serial.println("---");
+                            xSemaphoreGive(serialMutex);
+                        }
+                    }
+                }
+            }
+        }
+        else
+        {
+            // PID disabled or IMU not ready
+            if (xSemaphoreTake(pidMutex, pdMS_TO_TICKS(5)) == pdTRUE)
+            {
+                pidRollOutput = 0.0;
+                pidPitchOutput = 0.0;
+                pidYawOutput = 0.0;
+                pidAltitudeOutput = 0.0;
+                xSemaphoreGive(pidMutex);
+            }
+        }
+
+        // Wait for next cycle
+        vTaskDelayUntil(&xLastWakeTime, pidFrequency);
+    }
+}
+
+// Update flight mode based on control inputs and system state
+void updateFlightMode()
+{
+    static FlightMode previousMode = FLIGHT_MODE_DISARMED;
+
+    if (!motorsArmed || emergencyStop)
+    {
+        currentFlightMode = FLIGHT_MODE_DISARMED;
+        pidEnabled = false;
+    }
+    else
+    {
+        // Check joystick button states for mode switching
+        // Joy1 button: Toggle between Manual and Stabilize
+        // Joy2 button: Enable altitude hold (if in stabilize mode)
+
+        static bool joy1ButtonPressed = false;
+        static bool joy2ButtonPressed = false;
+
+        // Joy1 button (toggle stabilization)
+        if (receivedControl.joy1_btn == 0 && !joy1ButtonPressed) // Button pressed (active low)
+        {
+            joy1ButtonPressed = true;
+            if (currentFlightMode == FLIGHT_MODE_MANUAL)
+            {
+                currentFlightMode = FLIGHT_MODE_STABILIZE;
+                pidEnabled = true;
+
+                // Reset PID controllers when enabling
+                rollPID.reset();
+                pitchPID.reset();
+                yawPID.reset();
+            }
+            else if (currentFlightMode >= FLIGHT_MODE_STABILIZE)
+            {
+                currentFlightMode = FLIGHT_MODE_MANUAL;
+                pidEnabled = false;
+            }
+        }
+        else if (receivedControl.joy1_btn == 1) // Button released
+        {
+            joy1ButtonPressed = false;
+        }
+
+        // Joy2 button (altitude hold toggle)
+        if (receivedControl.joy2_btn == 0 && !joy2ButtonPressed) // Button pressed
+        {
+            joy2ButtonPressed = true;
+            if (currentFlightMode == FLIGHT_MODE_STABILIZE)
+            {
+                currentFlightMode = FLIGHT_MODE_ALTITUDE_HOLD;
+                targetAltitude = getFilteredAltitude(); // Set current altitude as target
+                altitudePID.setpoint = targetAltitude;
+                altitudePID.reset();
+            }
+            else if (currentFlightMode == FLIGHT_MODE_ALTITUDE_HOLD)
+            {
+                currentFlightMode = FLIGHT_MODE_STABILIZE;
+            }
+        }
+        else if (receivedControl.joy2_btn == 1) // Button released
+        {
+            joy2ButtonPressed = false;
+        }
+
+        // Default to manual mode on startup
+        if (currentFlightMode == FLIGHT_MODE_DISARMED && motorsArmed)
+        {
+            currentFlightMode = FLIGHT_MODE_MANUAL;
+            pidEnabled = false;
+        }
+    }
+
+    // Print mode changes
+    if (currentFlightMode != previousMode)
+    {
+        if (xSemaphoreTake(serialMutex, pdMS_TO_TICKS(100)) == pdTRUE)
+        {
+            Serial.print("Flight mode changed to: ");
+            switch (currentFlightMode)
+            {
+            case FLIGHT_MODE_DISARMED:
+                Serial.println("DISARMED");
+                break;
+            case FLIGHT_MODE_MANUAL:
+                Serial.println("MANUAL");
+                break;
+            case FLIGHT_MODE_STABILIZE:
+                Serial.println("STABILIZE");
+                break;
+            case FLIGHT_MODE_ALTITUDE_HOLD:
+                Serial.println("ALTITUDE HOLD");
+                break;
+            case FLIGHT_MODE_POSITION_HOLD:
+                Serial.println("POSITION HOLD");
+                break;
+            }
+            xSemaphoreGive(serialMutex);
+        }
+        previousMode = currentFlightMode;
+    }
+}
+
+// Get filtered altitude from barometric sensor
+float getFilteredAltitude()
+{
+    // This is a simple implementation - you might want to enhance this
+    // with more sophisticated filtering
+    if (xSemaphoreTake(telemetryMutex, pdMS_TO_TICKS(5)) == pdTRUE)
+    {
+        float altitude = telemetryData.altitude / 100.0; // Convert cm to meters
+        xSemaphoreGive(telemetryMutex);
+        return altitude;
+    }
+    return 0.0;
 }

@@ -5,11 +5,12 @@
 [![Platform](https://img.shields.io/badge/platform-ESP32-blue.svg)](https://www.espressif.com/en/products/socs/esp32)
 [![Framework](https://img.shields.io/badge/framework-Arduino-green.svg)](https://www.arduino.cc/)
 [![License](htt- **🚁 [firmware/](firmware/)** - Stable and development firmware versions
-  - **✅ [stable/drone/](firmware/stable/drone/)** - Production-ready drone firmware
-  - **✅ [stable/remote/](firmware/stable/remote/)** - Production-ready remote firmware  
-  - **🔬 [development/drone/](firmware/development/drone/)** - PID integration development
-  - **🔬 [development/remote/](firmware/development/remote/)** - Enhanced features developmentimg.shields.io/badge/license-MIT-brightgreen.svg)](LICENSE)
-[![Status](https://img.shields.io/badge/status-RF%20Control%20Complete-success.svg)](PROJECT_PROGRESS.md)
+
+- **✅ [stable/drone/](firmware/stable/drone/)** - Production-ready drone firmware
+- **✅ [stable/remote/](firmware/stable/remote/)** - Production-ready remote firmware
+- **🔬 [development/drone/](firmware/development/drone/)** - PID integration development
+- **🔬 [development/remote/](firmware/development/remote/)** - Enhanced features developmentimg.shields.io/badge/license-MIT-brightgreen.svg)](LICENSE)
+  [![Status](https://img.shields.io/badge/status-RF%20Control%20Complete-success.svg)](PROJECT_PROGRESS.md)
 
 ## 📋 Table of Contents
 
@@ -166,12 +167,12 @@ esp32-flight-controller/
 
 #### Motor Control (ESC PWM Outputs)
 
-| Motor       | Position    | GPIO Pin | ESC Connection   |
-| ----------- | ----------- | -------- | ---------------- |
-| **Motor 1** | Front Right | GPIO 13  | ESC1 signal wire |
-| **Motor 2** | Front Left  | GPIO 12  | ESC2 signal wire |
-| **Motor 3** | Back Left   | GPIO 14  | ESC3 signal wire |
-| **Motor 4** | Back Right  | GPIO 27  | ESC4 signal wire |
+| Motor       | Position          | GPIO Pin | ESC Connection   |
+| ----------- | ----------------- | -------- | ---------------- |
+| **Motor 1** | Front Right (CCW) | GPIO 13  | ESC1 signal wire |
+| **Motor 2** | Back Right (CW)   | GPIO 12  | ESC2 signal wire |
+| **Motor 3** | Front Left (CW)   | GPIO 14  | ESC3 signal wire |
+| **Motor 4** | Back Left (CCW)   | GPIO 27  | ESC4 signal wire |
 
 #### Communication Interfaces
 
