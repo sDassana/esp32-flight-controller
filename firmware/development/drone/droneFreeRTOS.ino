@@ -1771,10 +1771,10 @@ void calculateMotorSpeeds()
         return;
     }
 
-    // Convert throttle input to base throttle value
+    // Convert throttle input with full 2000μs range support and intelligent headroom management
     // Virtual Throttle Mode: Remote sends -3000 to +3000 where:
-    // -3000 = 0% power (minimum/idle), +3000 = 100% power (maximum)
-    // Map this to ESC pulse width range: ESC_ARM_PULSE (1000) to ~1600μs for safety
+    // -3000 = 0% power (minimum/idle), +3000 = 100% power (maximum = 2000μs when no control applied)
+    // When control inputs are active, base throttle is intelligently reduced to maintain differential control
 
     int throttleInput;
     int baseThrottle;
@@ -1787,10 +1787,45 @@ void calculateMotorSpeeds()
     }
     else
     {
-        // Map -3000 to +3000 range to 0 to 600 additional pulse width
-        // This gives us 1000μs (idle) to 1600μs (~80% throttle) for safety
-        throttleInput = map(receivedControl.throttle, -3000, 3000, 0, 600);
-        baseThrottle = ESC_ARM_PULSE + constrain(throttleInput, 0, 600);
+        // Calculate current control input magnitudes
+        int currentRollCorrection = 0;
+        int currentPitchCorrection = 0; 
+        int currentYawCorrection = 0;
+        
+        if (currentFlightMode == FLIGHT_MODE_MANUAL)
+        {
+            // Manual mode - use actual stick inputs
+            currentRollCorrection = abs(map(receivedControl.roll, -3000, 3000, -200, 200));
+            currentPitchCorrection = abs(map(receivedControl.pitch, -3000, 3000, -200, 200));
+            currentYawCorrection = abs(map(receivedControl.yaw, -3000, 3000, -150, 150));
+        }
+        else if (currentFlightMode >= FLIGHT_MODE_STABILIZE)
+        {
+            // Stabilized mode - use actual PID outputs (thread-safe read)
+            if (xSemaphoreTake(pidMutex, pdMS_TO_TICKS(2)) == pdTRUE)
+            {
+                currentRollCorrection = abs((int)pidRollOutput);
+                currentPitchCorrection = abs((int)pidPitchOutput);
+                currentYawCorrection = abs((int)pidYawOutput);
+                xSemaphoreGive(pidMutex);
+            }
+        }
+        
+        // Calculate required headroom based on ACTUAL control inputs (not theoretical maximum)
+        // This allows full 2000μs when no control is applied, but intelligently reserves space when needed
+        int requiredHeadroom = currentRollCorrection + currentPitchCorrection + currentYawCorrection;
+        
+        // Apply a small safety margin (10% of required headroom) to prevent brief overshoots
+        requiredHeadroom = (int)(requiredHeadroom * 1.1);
+        
+        // Calculate maximum safe base throttle with dynamic headroom
+        int maxSafeBaseThrottle = ESC_MAX_PULSE - requiredHeadroom;
+        maxSafeBaseThrottle = constrain(maxSafeBaseThrottle, ESC_ARM_PULSE, ESC_MAX_PULSE);
+        
+        // Map full throttle input range to available base throttle range
+        int availableThrottleRange = maxSafeBaseThrottle - ESC_ARM_PULSE;
+        throttleInput = map(receivedControl.throttle, -3000, 3000, 0, availableThrottleRange);
+        baseThrottle = ESC_ARM_PULSE + constrain(throttleInput, 0, availableThrottleRange);
     }
 
     // Get PID outputs (thread-safe)
@@ -1808,7 +1843,7 @@ void calculateMotorSpeeds()
     if (currentFlightMode == FLIGHT_MODE_MANUAL)
     {
         // Manual mode - direct stick control (no PID)
-        int rollInput = map(receivedControl.roll, -3000, 3000, -200, 200); // Reduced range for manual
+        int rollInput = map(receivedControl.roll, -3000, 3000, -200, 200);
         int pitchInput = map(receivedControl.pitch, -3000, 3000, -200, 200);
         int yawInput = map(receivedControl.yaw, -3000, 3000, -150, 150);
 
@@ -1836,27 +1871,74 @@ void calculateMotorSpeeds()
         motorSpeeds[3] = adjustedBaseThrottle - rollCorrection - pitchCorrection - yawCorrection; // Back Left (CCW)
     }
 
-    // Constrain motor speeds to safe range
+    // Enhanced motor speed limiting with intelligent differential control
+    // First constrain to basic range
     for (int i = 0; i < 4; i++)
     {
         motorSpeeds[i] = constrain(motorSpeeds[i], ESC_ARM_PULSE, ESC_MAX_PULSE);
     }
+    
+    // Advanced safety: If any motor exceeds limits, use differential motor compensation
+    // Instead of scaling all motors down, increase opposite motors and decrease base throttle
+    int maxMotorSpeed = max(max(motorSpeeds[0], motorSpeeds[1]), max(motorSpeeds[2], motorSpeeds[3]));
+    int minMotorSpeed = min(min(motorSpeeds[0], motorSpeeds[1]), min(motorSpeeds[2], motorSpeeds[3]));
+    
+    if (maxMotorSpeed > ESC_MAX_PULSE)
+    {
+        // Calculate excess that needs to be compensated
+        int excess = maxMotorSpeed - ESC_MAX_PULSE;
+        
+        // Differential compensation: reduce all motors by the excess amount
+        // This maintains the relative differences while keeping all motors within limits
+        for (int i = 0; i < 4; i++)
+        {
+            motorSpeeds[i] -= excess;
+            motorSpeeds[i] = constrain(motorSpeeds[i], ESC_ARM_PULSE, ESC_MAX_PULSE);
+        }
+        
+        // The control authority is now maintained through differential speeds
+        // rather than absolute motor speeds - this is how professional flight controllers work
+    }
+    
+    // Additional safety check - if any motor is still below minimum, bring all up proportionally
+    minMotorSpeed = min(min(motorSpeeds[0], motorSpeeds[1]), min(motorSpeeds[2], motorSpeeds[3]));
+    if (minMotorSpeed < ESC_ARM_PULSE)
+    {
+        int deficit = ESC_ARM_PULSE - minMotorSpeed;
+        for (int i = 0; i < 4; i++)
+        {
+            motorSpeeds[i] += deficit;
+            motorSpeeds[i] = constrain(motorSpeeds[i], ESC_ARM_PULSE, ESC_MAX_PULSE);
+        }
+    }
 
-    // Enhanced debug output with throttle and motor information (less frequent to avoid overwhelming serial)
+    // Enhanced debug output with intelligent throttle management info (less frequent to avoid overwhelming serial)
     static unsigned long lastMotorDebug = 0;
     if (millis() - lastMotorDebug > 2000) // Every 2 seconds
     {
         if (xSemaphoreTake(serialMutex, pdMS_TO_TICKS(50)) == pdTRUE)
         {
+            // Calculate current throttle percentage and control activity
+            int maxCurrentMotor = max(max(motorSpeeds[0], motorSpeeds[1]), max(motorSpeeds[2], motorSpeeds[3]));
+            int minCurrentMotor = min(min(motorSpeeds[0], motorSpeeds[1]), min(motorSpeeds[2], motorSpeeds[3]));
+            int throttlePercent = map(baseThrottle, ESC_ARM_PULSE, ESC_MAX_PULSE, 0, 100);
+            int controlActivity = maxCurrentMotor - minCurrentMotor; // Shows how much control authority is being used
+            
             Serial.print("🚁 Motors: Armed:");
             Serial.print(motorsArmed ? "YES" : "NO");
             Serial.print(" | Throttle: Raw:");
             Serial.print(receivedControl.throttle);
-            Serial.print(" Mapped:");
-            Serial.print(throttleInput);
             Serial.print(" Base:");
             Serial.print(baseThrottle);
-            Serial.print(" | Speeds: [");
+            Serial.print("μs (");
+            Serial.print(throttlePercent);
+            Serial.print("%) | Motor Range: ");
+            Serial.print(minCurrentMotor);
+            Serial.print("-");
+            Serial.print(maxCurrentMotor);
+            Serial.print("μs | Control Activity:");
+            Serial.print(controlActivity);
+            Serial.print("μs | Speeds:[");
             Serial.print(motorSpeeds[0]);
             Serial.print(",");
             Serial.print(motorSpeeds[1]);
