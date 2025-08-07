@@ -10,7 +10,7 @@
 - **✅ [stable/remote/](firmware/stable/remote/)** - Production-ready remote firmware
 - **🔬 [development/drone/](firmware/development/drone/)** - PID integration development
 - **🔬 [development/remote/](firmware/development/remote/)** - Enhanced features developmentimg.shields.io/badge/license-MIT-brightgreen.svg)](LICENSE)
-  [![Status](https://img.shields.io/badge/status-RF%20Control%20Complete-success.svg)](PROJECT_PROGRESS.md)
+  [![Status](https://img.shields.io/badge/status-Motor%20Control%20Operational-success.svg)](docs/PROJECT_PROGRESS.md)
 
 ## 📋 Table of Contents
 

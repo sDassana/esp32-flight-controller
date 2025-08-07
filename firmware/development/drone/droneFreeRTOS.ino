@@ -198,6 +198,7 @@ struct PIDController
 
     // Anti-windup flags
     bool wasOutputSaturated;
+    bool wasIntegralSaturated;
 
     void initialize(double p, double i, double d, double minOut, double maxOut)
     {
@@ -221,6 +222,7 @@ struct PIDController
         lastTime = millis();
         enabled = false;
         wasOutputSaturated = false;
+        wasIntegralSaturated = false;
 
         // Filter coefficients (higher = more filtering)
         derivativeAlpha = 0.1; // 10% new, 90% old for derivative
@@ -261,10 +263,17 @@ struct PIDController
             iTerm += ki * error * dt;
 
             // Clamp integral term to prevent windup
+            wasIntegralSaturated = false;
             if (iTerm > iTermMax)
+            {
                 iTerm = iTermMax;
+                wasIntegralSaturated = true;
+            }
             else if (iTerm < iTermMin)
+            {
                 iTerm = iTermMin;
+                wasIntegralSaturated = true;
+            }
         }
 
         // Derivative term with filtered input to reduce noise
@@ -312,6 +321,7 @@ struct PIDController
         smoothedSetpoint = setpoint;
         lastTime = millis();
         wasOutputSaturated = false;
+        wasIntegralSaturated = false;
     }
 
     void setTunings(double p, double i, double d)
@@ -369,6 +379,7 @@ struct PIDController
     double getIntegralTerm() { return iTerm; }
     double getDerivativeTerm() { return -kd * ((filteredInput - lastFilteredInput) * 1000.0 / max(1UL, millis() - lastTime)); }
     bool isOutputSaturated() { return wasOutputSaturated; }
+    bool isIntegralSaturated() { return wasIntegralSaturated; }
     double getSmoothedSetpoint() { return smoothedSetpoint; }
 };
 
@@ -456,7 +467,6 @@ bool ens160Ready = false;
 
 // Motor control variables
 volatile bool motorsArmed = false;
-volatile bool emergencyStop = false;
 volatile int motorSpeeds[4] = {ESC_ARM_PULSE, ESC_ARM_PULSE, ESC_ARM_PULSE, ESC_ARM_PULSE};
 unsigned long lastValidControl = 0;
 #define CONTROL_TIMEOUT_MS 1000   // 1 second timeout for safety
@@ -465,12 +475,19 @@ unsigned long lastValidControl = 0;
 #define MOTOR_TASK_PRIORITY 4 // High priority for motor control
 
 // Altitude calibration variables
-#define PRESSURE_BUFFER_SIZE 5    // Smaller buffer for faster response
+#define PRESSURE_BUFFER_SIZE 20   // Increased buffer for better smoothing
 float seaLevelPressure = 1013.25; // Will be calibrated at startup
 bool altitudeCalibrated = false;
 float pressureReadings[PRESSURE_BUFFER_SIZE]; // For smoothing pressure readings
 int pressureIndex = 0;
 int pressureCount = 0;
+
+// Enhanced altitude stability
+float referenceTemperature = 15.0;   // Reference temperature for compensation
+float exponentialPressure = 1013.25; // Exponentially smoothed pressure
+float altitudeOffset = 0.0;          // Zero-reference offset
+unsigned long lastAltitudeCalibration = 0;
+const float PRESSURE_SMOOTHING_ALPHA = 0.1; // Exponential smoothing factor
 
 // Task timing variables
 unsigned long sensorTaskCounter = 0;
@@ -496,9 +513,21 @@ struct IMUCalibration
     int calibrationSamples = 0;
 } imuCalibration;
 
+// Yaw drift correction variables
+float gyroZBiasSum = 0.0;
+int gyroBiasSampleCount = 0;
+const int GYRO_BIAS_SAMPLES = 1000; // Number of samples for bias calculation
+float adaptiveGyroZBias = 0.0;      // Adaptive bias for yaw drift correction
+unsigned long lastYawReset = 0;
+const float YAW_LEAKY_ALPHA = 0.9999; // Leaky integrator coefficient (very close to 1)
+bool isStationary = false;            // Flag to determine if drone is stationary
+unsigned long stationaryStartTime = 0;
+const unsigned long STATIONARY_THRESHOLD_TIME = 5000; // 5 seconds to consider stationary
+
 // PID and Flight Control Variables
 bool pidEnabled = false;
 bool imuInitialized = false;
+bool enableVerboseLogging = false;   // Debug verbose logging control
 float targetAltitude = 0.0;          // Target altitude for altitude hold mode
 float baseThrottleForHover = 1400.0; // Base throttle for hovering (will be auto-adjusted)
 unsigned long lastPIDUpdate = 0;
@@ -511,17 +540,71 @@ volatile float pidPitchOutput = 0.0;
 volatile float pidYawOutput = 0.0;
 volatile float pidAltitudeOutput = 0.0;
 
+// Function declarations
+void updateFlightMode();
+float getFilteredAltitude();
+
 void setup()
 {
+    // ⚠️ CRITICAL: ESC CALIBRATION MUST HAPPEN IMMEDIATELY ON POWER-ON
+    // ESCs MUST see MAX signal (2000μs) within milliseconds of power-on to enter calibration mode
+
+    // Configure servo library for ESCs FIRST - before anything else
+    ESP32PWM::allocateTimer(0);
+    ESP32PWM::allocateTimer(1);
+    ESP32PWM::allocateTimer(2);
+    ESP32PWM::allocateTimer(3);
+
+    // Attach ESCs to pins immediately
+    esc1.setPeriodHertz(ESC_FREQUENCY);
+    esc2.setPeriodHertz(ESC_FREQUENCY);
+    esc3.setPeriodHertz(ESC_FREQUENCY);
+    esc4.setPeriodHertz(ESC_FREQUENCY);
+
+    bool escAttachSuccess = true;
+    escAttachSuccess &= esc1.attach(ESC1_PIN, ESC_MIN_PULSE, ESC_MAX_PULSE);
+    escAttachSuccess &= esc2.attach(ESC2_PIN, ESC_MIN_PULSE, ESC_MAX_PULSE);
+    escAttachSuccess &= esc3.attach(ESC3_PIN, ESC_MIN_PULSE, ESC_MAX_PULSE);
+    escAttachSuccess &= esc4.attach(ESC4_PIN, ESC_MIN_PULSE, ESC_MAX_PULSE);
+
+    // IMMEDIATELY send MAX signal (2000μs) for ESC calibration - NO DELAY!
+    esc1.writeMicroseconds(ESC_MAX_PULSE);
+    esc2.writeMicroseconds(ESC_MAX_PULSE);
+    esc3.writeMicroseconds(ESC_MAX_PULSE);
+    esc4.writeMicroseconds(ESC_MAX_PULSE);
+
+    // Now initialize serial (ESCs already have MAX signal)
     Serial.begin(115200);
     delay(1000); // Give serial time to initialize
 
-    Serial.println("=== Drone with Real Sensors - FreeRTOS Version ===");
-    Serial.println("Initializing system components...");
+    if (!escAttachSuccess)
+    {
+        Serial.println("⚠️ WARNING: Some ESCs failed to attach properly!");
+    }
 
-    // CRITICAL: Initialize ESCs FIRST - immediately on power-on for proper calibration
-    Serial.println("PRIORITY: Initializing ESCs immediately on power-on...");
-    initializeESCs();
+    Serial.println("=== Drone with Real Sensors - FreeRTOS Version ===");
+    Serial.println("⚠️ ESC CALIBRATION IN PROGRESS - MAX SIGNAL ACTIVE");
+    Serial.println("Waiting 2 seconds for ESC calibration...");
+
+    // Wait exactly 2 seconds with MAX signal for ESC calibration
+    delay(1000); // Additional 1 second (total 2 seconds from power-on)
+
+    // Now send MIN signal (1000μs) to complete calibration
+    esc1.writeMicroseconds(ESC_ARM_PULSE);
+    esc2.writeMicroseconds(ESC_ARM_PULSE);
+    esc3.writeMicroseconds(ESC_ARM_PULSE);
+    esc4.writeMicroseconds(ESC_ARM_PULSE);
+
+    Serial.println("✓ ESC CALIBRATION COMPLETE - Motors ready");
+
+    // Initialize motor speeds to safe values
+    for (int i = 0; i < 4; i++)
+    {
+        motorSpeeds[i] = ESC_ARM_PULSE;
+    }
+    motorsArmed = false;
+
+    Serial.println("Initializing system components...");
 
     // Initialize I2C for sensors
     Wire.begin(21, 22); // SDA=21, SCL=22
@@ -549,6 +632,18 @@ void setup()
         while (1)
             delay(1000);
     }
+
+    // Initialize enhanced stability variables
+    exponentialPressure = seaLevelPressure;
+    altitudeOffset = 0.0;
+    adaptiveGyroZBias = 0.0;
+    gyroZBiasSum = 0.0;
+    gyroBiasSampleCount = 0;
+    isStationary = false;
+    lastYawReset = millis();
+    lastAltitudeCalibration = millis();
+
+    Serial.println("✓ Enhanced stability systems initialized");
 
     // Initialize real sensors
     initializeRealSensors();
@@ -1074,18 +1169,30 @@ void readEnvironmentalSensors()
             }
             float smoothedPressure = pressureSum / pressureCount;
 
-            // Calculate altitude using smoothed pressure
+            // Apply exponential smoothing for additional stability
+            exponentialPressure = (PRESSURE_SMOOTHING_ALPHA * smoothedPressure) +
+                                  ((1.0 - PRESSURE_SMOOTHING_ALPHA) * exponentialPressure);
+
+            // Temperature compensation for BME280
+            float currentTemperature = telemetryData.temperature / 100.0;                         // Convert from scaled integer (x100) to degrees C
+            float tempCompensation = 1.0 + (currentTemperature - referenceTemperature) * 0.00366; // ~0.366% per °C
+            float compensatedPressure = exponentialPressure * tempCompensation;
+
+            // Calculate altitude using temperature-compensated pressure
             float altitude;
             if (altitudeCalibrated)
             {
-                // Use calibrated reference for relative altitude
-                altitude = 44330.0 * (1.0 - pow(smoothedPressure / seaLevelPressure, 0.1903));
+                // Use calibrated reference for relative altitude with temperature compensation
+                altitude = 44330.0 * (1.0 - pow(compensatedPressure / seaLevelPressure, 0.1903));
             }
             else
             {
-                // Use standard sea level pressure
-                altitude = 44330.0 * (1.0 - pow(smoothedPressure / 1013.25, 0.1903));
+                // Use standard sea level pressure with temperature compensation
+                altitude = 44330.0 * (1.0 - pow(compensatedPressure / 1013.25, 0.1903));
             }
+
+            // Apply altitude offset for zero-reference
+            altitude -= altitudeOffset;
 
             // Debug output for pressure and altitude calculation (less frequent)
             static unsigned long lastDebug = 0;
@@ -1094,15 +1201,20 @@ void readEnvironmentalSensors()
             {
                 if (xSemaphoreTake(serialMutex, pdMS_TO_TICKS(100)) == pdTRUE)
                 {
-                    Serial.print("DEBUG - Current P: ");
+                    Serial.print("DEBUG - P: ");
                     Serial.print(currentPressure, 2);
-                    Serial.print(" hPa, Smoothed P: ");
-                    Serial.print(smoothedPressure, 2);
-                    Serial.print(" hPa, Ref P: ");
+                    Serial.print("/");
+                    Serial.print(exponentialPressure, 2);
+                    Serial.print(" hPa, Ref: ");
                     Serial.print(seaLevelPressure, 2);
-                    Serial.print(" hPa, Raw Alt: ");
+                    Serial.print(" hPa, Alt: ");
                     Serial.print(altitude, 2);
-                    Serial.println(" m");
+                    Serial.print(" m, Temp: ");
+                    Serial.print(telemetryData.temperature, 1);
+                    Serial.print("°C, YawBias: ");
+                    Serial.print(adaptiveGyroZBias, 3);
+                    Serial.print(", Stationary: ");
+                    Serial.println(isStationary ? "YES" : "NO");
                     xSemaphoreGive(serialMutex);
                 }
                 lastDebug = millis();
@@ -1312,12 +1424,12 @@ void handleControlData()
                 xSemaphoreGive(controlMutex);
             }
 
-            // Print received control data with real sensor info (thread-safe)
+            // Print received control data with organized format (thread-safe)
             if (xSemaphoreTake(serialMutex, pdMS_TO_TICKS(50)) == pdTRUE)
             {
-                Serial.print("Control #");
+                Serial.print("📡 RX #");
                 Serial.print(packetsReceived);
-                Serial.print(" - T:");
+                Serial.print(" | Controls: T:");
                 Serial.print(localControl.throttle);
                 Serial.print(" R:");
                 Serial.print(localControl.roll);
@@ -1327,44 +1439,28 @@ void handleControlData()
                 Serial.print(localControl.yaw);
 
                 // Show button states when pressed
+                Serial.print(" | Buttons:");
                 if (localControl.joy1_btn == 0)
-                    Serial.print(" [JOY1-BTN]");
+                    Serial.print(" JOY1");
                 if (localControl.joy2_btn == 0)
-                    Serial.print(" [JOY2-BTN]");
+                    Serial.print(" JOY2");
+                if (localControl.joy1_btn == 1 && localControl.joy2_btn == 1)
+                    Serial.print(" None");
 
-                // Show toggle switch states
+                // Show toggle switch states with new functionality
+                Serial.print(" | Toggles: SW1:");
                 if (localControl.toggle1 == 1)
-                    Serial.print(" [SW1-ARM]");
+                    Serial.print("ARM");
+                else
+                    Serial.print("DISARM");
+
+                Serial.print(" SW2:");
                 if (localControl.toggle2 == 1)
-                    Serial.print(" [SW2-ESTOP]");
+                    Serial.print("STAB");
+                else
+                    Serial.print("MAN");
 
-                // Get current telemetry for display
-                TelemetryPacket currentTelemetry;
-                if (xSemaphoreTake(telemetryMutex, pdMS_TO_TICKS(10)) == pdTRUE)
-                {
-                    currentTelemetry = telemetryData;
-                    xSemaphoreGive(telemetryMutex);
-                }
-
-                Serial.print(" | Sensors - Temp:");
-                Serial.print(currentTelemetry.temperature / 100.0);
-                Serial.print("°C Hum:");
-                Serial.print(currentTelemetry.humidity);
-                Serial.print("% Press:");
-                Serial.print(currentTelemetry.pressure / 10.0);
-                Serial.print("hPa Alt:");
-                Serial.print(currentTelemetry.altitude / 100.0); // Display altitude in meters with 2 decimals
-                Serial.print("m GPS:");
-                Serial.print(currentTelemetry.satellites);
-                Serial.print(" sats Lux:");
-                Serial.print(currentTelemetry.lux);
-                Serial.print("lx UV:");
-                Serial.print(currentTelemetry.uvIndex / 100.0);
-                Serial.print(" CO2:");
-                Serial.print(currentTelemetry.eCO2);
-                Serial.print("ppm TVOC:");
-                Serial.print(currentTelemetry.TVOC);
-                Serial.println("ppb");
+                Serial.println();
 
                 xSemaphoreGive(serialMutex);
             }
@@ -1408,49 +1504,54 @@ void printStatus()
 
     bool controlActive = (millis() - lastControl) < 3000;
 
-    Serial.print("Drone status [FreeRTOS+PID] - Running ");
-    Serial.print(uptime);
-    Serial.print("s, Control packets: ");
-    Serial.print(packets);
-    Serial.print(", Active: ");
-    Serial.print(controlActive ? "YES" : "NO");
+    Serial.println("╔═══════════════ SYSTEM STATUS REPORT ═══════════════╗");
 
-    // Flight mode and motor status
-    Serial.print(", Mode: ");
+    // === SYSTEM UPTIME AND COMMUNICATION ===
+    Serial.print("║ 🚁 UPTIME: ");
+    Serial.print(uptime);
+    Serial.print("s | PACKETS: ");
+    Serial.print(packets);
+    Serial.print(" | COMM: ");
+    Serial.print(controlActive ? "✅ACTIVE" : "❌TIMEOUT");
+
+    // === FLIGHT STATUS ===
+    Serial.print(" | MODE: ");
     switch (currentFlightMode)
     {
     case FLIGHT_MODE_DISARMED:
-        Serial.print("DISARMED");
+        Serial.print("🔒DISARMED");
         break;
     case FLIGHT_MODE_MANUAL:
-        Serial.print("MANUAL");
+        Serial.print("🎮MANUAL");
         break;
     case FLIGHT_MODE_STABILIZE:
-        Serial.print("STABILIZE");
+        Serial.print("🎯STABILIZE");
         break;
     case FLIGHT_MODE_ALTITUDE_HOLD:
-        Serial.print("ALT_HOLD");
+        Serial.print("🛸ALT_HOLD");
         break;
     case FLIGHT_MODE_POSITION_HOLD:
-        Serial.print("POS_HOLD");
+        Serial.print("🌍POS_HOLD");
         break;
     default:
-        Serial.print("UNKNOWN");
+        Serial.print("❓UNKNOWN");
         break;
     }
+    Serial.println(" ║");
 
-    Serial.print(", Motors: ");
-    Serial.print(motorsArmed ? "ARMED" : "DISARMED");
-    if (emergencyStop)
-        Serial.print(" [E-STOP]");
+    // === MOTOR AND CONTROL STATUS ===
+    Serial.print("║ ⚡ MOTORS: ");
+    Serial.print(motorsArmed ? "✅ARMED" : "❌DISARMED");
+    Serial.print(" | PID: ");
+    Serial.print(pidEnabled ? "✅ON" : "❌OFF");
 
     // IMU Status
-    Serial.print(", IMU: ");
+    Serial.print(" | IMU: ");
     if (imuInitialized && imuCalibration.calibrated)
     {
         if (xSemaphoreTake(imuMutex, pdMS_TO_TICKS(50)) == pdTRUE)
         {
-            Serial.print("OK [R:");
+            Serial.print("✅OK [R:");
             Serial.print(imuData.roll, 1);
             Serial.print("° P:");
             Serial.print(imuData.pitch, 1);
@@ -1462,98 +1563,48 @@ void printStatus()
     }
     else if (imuInitialized && !imuCalibration.calibrated)
     {
-        Serial.print("CALIBRATING(");
+        Serial.print("🔄CAL(");
         Serial.print(imuCalibration.calibrationSamples);
         Serial.print("/500)");
     }
     else
     {
-        Serial.print("FAILED");
+        Serial.print("❌FAIL");
     }
+    Serial.println(" ║");
 
-    // PID Status (simplified - just enabled/disabled)
-    Serial.print(", PID: ");
-    Serial.print(pidEnabled ? "ENABLED" : "DISABLED");
-
-    // Environmental sensors
-    Serial.print(", Sensors: Temp:");
-    Serial.print(currentTelemetry.temperature / 100.0);
-    Serial.print("°C Hum:");
+    // === ENVIRONMENTAL SENSORS ===
+    Serial.print("║ 🌡️  ENV: ");
+    Serial.print(currentTelemetry.temperature / 100.0, 1);
+    Serial.print("°C | ");
     Serial.print(currentTelemetry.humidity);
-    Serial.print("% Press:");
-    Serial.print(currentTelemetry.pressure / 10.0);
-    Serial.print("hPa Alt:");
-    Serial.print(currentTelemetry.altitude / 100.0); // Display altitude in meters with 2 decimals
-    Serial.print("m GPS:");
+    Serial.print("%RH | ");
+    Serial.print(currentTelemetry.pressure / 10.0, 1);
+    Serial.print("hPa | Alt:");
+    Serial.print(currentTelemetry.altitude / 100.0, 2);
+    Serial.println("m ║");
+
+    // === NAVIGATION AND POWER ===
+    Serial.print("║ 🛰️  NAV: GPS:");
     Serial.print(currentTelemetry.satellites);
-    Serial.print(" sats Batt:");
+    Serial.print(" sats | BATT:");
     Serial.print(currentTelemetry.battery);
-    Serial.print("mV Lux:");
+    Serial.print("mV | LIGHT:");
     Serial.print(currentTelemetry.lux);
-    Serial.print("lx UV:");
-    Serial.print(currentTelemetry.uvIndex / 100.0);
-    Serial.print(" CO2:");
+    Serial.print("lx | UV:");
+    Serial.print(currentTelemetry.uvIndex / 100.0, 2);
+    Serial.println(" ║");
+
+    // === AIR QUALITY ===
+    Serial.print("║ 🌬️  AIR: CO2:");
     Serial.print(currentTelemetry.eCO2);
-    Serial.print("ppm TVOC:");
+    Serial.print("ppm | TVOC:");
     Serial.print(currentTelemetry.TVOC);
-    Serial.println("ppb");
-}
+    Serial.print("ppb | FREE HEAP:");
+    Serial.print(ESP.getFreeHeap());
+    Serial.println(" bytes ║");
 
-// ESC Initialization Function - CRITICAL: Called immediately on power-on
-void initializeESCs()
-{
-    // Direct serial output - no mutex needed since FreeRTOS not started yet
-    Serial.println("CRITICAL: Initializing ESCs immediately on power-on for proper calibration...");
-
-    // Configure servo library for ESCs
-    ESP32PWM::allocateTimer(0);
-    ESP32PWM::allocateTimer(1);
-    ESP32PWM::allocateTimer(2);
-    ESP32PWM::allocateTimer(3);
-
-    // Attach ESCs to pins
-    esc1.setPeriodHertz(ESC_FREQUENCY);
-    esc2.setPeriodHertz(ESC_FREQUENCY);
-    esc3.setPeriodHertz(ESC_FREQUENCY);
-    esc4.setPeriodHertz(ESC_FREQUENCY);
-
-    esc1.attach(ESC1_PIN, ESC_MIN_PULSE, ESC_MAX_PULSE);
-    esc2.attach(ESC2_PIN, ESC_MIN_PULSE, ESC_MAX_PULSE);
-    esc3.attach(ESC3_PIN, ESC_MIN_PULSE, ESC_MAX_PULSE);
-    esc4.attach(ESC4_PIN, ESC_MIN_PULSE, ESC_MAX_PULSE);
-
-    // ESC Calibration Sequence (as per README requirements) - IMMEDIATE on power-on
-    Serial.println("Starting IMMEDIATE ESC calibration sequence...");
-    Serial.println("1. Setting MAX throttle for 2 seconds (POWER-ON CALIBRATION)...");
-
-    // Step 1: Maximum throttle for 2 seconds
-    esc1.writeMicroseconds(ESC_MAX_PULSE);
-    esc2.writeMicroseconds(ESC_MAX_PULSE);
-    esc3.writeMicroseconds(ESC_MAX_PULSE);
-    esc4.writeMicroseconds(ESC_MAX_PULSE);
-
-    delay(2000); // Use regular delay since FreeRTOS not started yet
-
-    Serial.println("2. Setting MIN throttle (arming)...");
-
-    // Step 2: Minimum throttle (arming position)
-    esc1.writeMicroseconds(ESC_ARM_PULSE);
-    esc2.writeMicroseconds(ESC_ARM_PULSE);
-    esc3.writeMicroseconds(ESC_ARM_PULSE);
-    esc4.writeMicroseconds(ESC_ARM_PULSE);
-
-    delay(1000); // Use regular delay since FreeRTOS not started yet
-
-    Serial.println("✓ ESC calibration complete - Motors ready");
-
-    // Initialize motor speeds to safe values
-    for (int i = 0; i < 4; i++)
-    {
-        motorSpeeds[i] = ESC_ARM_PULSE;
-    }
-
-    motorsArmed = false;
-    emergencyStop = false;
+    Serial.println("╚═════════════════════════════════════════════════════╝");
 }
 
 // Motor Control Task
@@ -1564,23 +1615,10 @@ void motorTask(void *parameter)
 
     for (;;)
     {
-        // Check for control timeout (safety feature)
-        unsigned long currentTime = millis();
-        bool controlValid = (currentTime - lastValidControl) < CONTROL_TIMEOUT_MS;
-
-        if (!controlValid || emergencyStop)
+        // Process control inputs and calculate motor speeds
+        if (xSemaphoreTake(controlMutex, pdMS_TO_TICKS(10)) == pdTRUE)
         {
-            // Safety: Stop all motors if no recent control or emergency stop
-            for (int i = 0; i < 4; i++)
-            {
-                motorSpeeds[i] = ESC_ARM_PULSE;
-            }
-            motorsArmed = false;
-        }
-        else if (xSemaphoreTake(controlMutex, pdMS_TO_TICKS(10)) == pdTRUE)
-        {
-            // Process control inputs and calculate motor speeds
-            calculateMotorSpeeds();
+            calculateMotorSpeeds(); // This function handles timeout checking internally
             xSemaphoreGive(controlMutex);
         }
 
@@ -1598,35 +1636,142 @@ void motorTask(void *parameter)
 // Calculate Motor Speeds from Control Inputs with PID Integration
 void calculateMotorSpeeds()
 {
-    // Check emergency stop (toggle switch 2)
-    if (receivedControl.toggle2 == 1)
+    // Check for control timeout first - don't process anything if timed out
+    unsigned long currentTime = millis();
+    bool controlValid = (currentTime - lastValidControl) < CONTROL_TIMEOUT_MS;
+
+    if (!controlValid)
     {
-        emergencyStop = true;
-        if (xSemaphoreTake(serialMutex, pdMS_TO_TICKS(10)) == pdTRUE)
+        // Control timeout - force disarmed state and stop all motors
+        motorsArmed = false;
+        currentFlightMode = FLIGHT_MODE_DISARMED;
+        pidEnabled = false;
+
+        // Safety: Stop all motors
+        for (int i = 0; i < 4; i++)
         {
-            static unsigned long lastEmergencyMsg = 0;
-            if (millis() - lastEmergencyMsg > 5000)
+            motorSpeeds[i] = ESC_ARM_PULSE;
+        }
+
+        // Print timeout warning periodically (every 5 seconds)
+        static unsigned long lastTimeoutWarning = 0;
+        if (currentTime - lastTimeoutWarning > 5000)
+        {
+            if (xSemaphoreTake(serialMutex, pdMS_TO_TICKS(50)) == pdTRUE)
             {
-                Serial.println("EMERGENCY STOP ACTIVATED!");
-                lastEmergencyMsg = millis();
+                Serial.println("⚠️  CONTROL TIMEOUT - Motors disarmed for safety");
+                xSemaphoreGive(serialMutex);
             }
-            xSemaphoreGive(serialMutex);
+            lastTimeoutWarning = currentTime;
         }
         return;
     }
-    else
-    {
-        emergencyStop = false;
-    }
+
+    // Toggle switch 2 now controls flight mode (Manual/Stabilize)
+    // No emergency stop - use toggle switch 1 (disarm) for emergencies
 
     // Check if motors should be armed (toggle switch 1 controls arming)
-    if (receivedControl.toggle1 == 1 && !emergencyStop)
+    if (receivedControl.toggle1 == 1)
     {
+        bool wasDisarmed = !motorsArmed;
         motorsArmed = true;
+
+        // Toggle switch 2 controls flight mode when armed
+        if (receivedControl.toggle2 == 1)
+        {
+            // Toggle switch 2 ON = Stabilized mode
+            if (currentFlightMode != FLIGHT_MODE_STABILIZE && motorsArmed)
+            {
+                currentFlightMode = FLIGHT_MODE_STABILIZE;
+                pidEnabled = true;
+
+                // Reset PID controllers when switching to stabilize mode
+                rollPID.reset();
+                pitchPID.reset();
+                yawPID.reset();
+
+                if (xSemaphoreTake(serialMutex, pdMS_TO_TICKS(50)) == pdTRUE)
+                {
+                    Serial.println("🎯 FLIGHT MODE: STABILIZE - PID ACTIVE");
+                    xSemaphoreGive(serialMutex);
+                }
+            }
+        }
+        else
+        {
+            // Toggle switch 2 OFF = Manual mode
+            if (currentFlightMode != FLIGHT_MODE_MANUAL && motorsArmed)
+            {
+                currentFlightMode = FLIGHT_MODE_MANUAL;
+                pidEnabled = false;
+
+                if (xSemaphoreTake(serialMutex, pdMS_TO_TICKS(50)) == pdTRUE)
+                {
+                    Serial.println("🎮 FLIGHT MODE: MANUAL - DIRECT CONTROL");
+                    xSemaphoreGive(serialMutex);
+                }
+            }
+        }
+
+        // When first armed, set initial mode based on toggle switch 2
+        if (wasDisarmed)
+        {
+            if (receivedControl.toggle2 == 1)
+            {
+                currentFlightMode = FLIGHT_MODE_STABILIZE;
+                pidEnabled = true;
+                rollPID.reset();
+                pitchPID.reset();
+                yawPID.reset();
+
+                if (xSemaphoreTake(serialMutex, pdMS_TO_TICKS(50)) == pdTRUE)
+                {
+                    Serial.println("🔓 MOTORS ARMED - STABILIZE MODE ACTIVE");
+                    xSemaphoreGive(serialMutex);
+                }
+            }
+            else
+            {
+                currentFlightMode = FLIGHT_MODE_MANUAL;
+                pidEnabled = false;
+
+                if (xSemaphoreTake(serialMutex, pdMS_TO_TICKS(50)) == pdTRUE)
+                {
+                    Serial.println("🔓 MOTORS ARMED - MANUAL MODE ACTIVE");
+                    xSemaphoreGive(serialMutex);
+                }
+            }
+        }
     }
     else
     {
+        // Motors being disarmed - trigger pressure re-calibration
+        static bool wasArmed = false;
+        if (wasArmed && motorsArmed) // Transition from armed to disarmed
+        {
+            // Re-calibrate pressure reference and reset altitude offset
+            if (pressureCount >= PRESSURE_BUFFER_SIZE / 2) // Ensure we have enough samples
+            {
+                seaLevelPressure = exponentialPressure;
+                altitudeOffset = 0.0; // Reset to make current position the reference (0m)
+                altitudeCalibrated = true;
+                lastAltitudeCalibration = millis();
+
+                if (xSemaphoreTake(serialMutex, pdMS_TO_TICKS(100)) == pdTRUE)
+                {
+                    Serial.printf("Altitude re-calibrated on disarm - Ref P: %.2f hPa, Offset: %.2f m\n",
+                                  seaLevelPressure, altitudeOffset);
+                    xSemaphoreGive(serialMutex);
+                }
+            }
+
+            // Reset yaw angle to prevent accumulation
+            imuData.yaw = 0.0;
+            lastYawReset = millis();
+        }
+        wasArmed = motorsArmed;
         motorsArmed = false;
+        currentFlightMode = FLIGHT_MODE_DISARMED;
     }
 
     if (!motorsArmed)
@@ -1640,13 +1785,16 @@ void calculateMotorSpeeds()
     }
 
     // Convert throttle input to base throttle value
-    int throttleInput = map(receivedControl.throttle, -3000, 3000, -500, 500);
+    // Remote sends -3000 to +3000 (where -3000 = 0% power, +3000 = 100% power)
+    // Map full range directly to throttle output for immediate response
+    int throttleInput = map(receivedControl.throttle, -3000, 3000, 0, 500);
     int baseThrottle = ESC_ARM_PULSE;
 
-    // Only add throttle if stick is above center (for safety)
-    if (throttleInput > 0)
+    // Apply throttle input for ANY value above minimum (-3000)
+    // This allows immediate response from the bottom of the joystick range
+    if (receivedControl.throttle > -3000) // Any throttle input above minimum activates motors
     {
-        baseThrottle += map(throttleInput, 0, 500, 0, 400); // Max 400 additional pulse width
+        baseThrottle += throttleInput; // Direct mapping: 0-500 additional pulse width range
     }
 
     // Get PID outputs (thread-safe)
@@ -1668,11 +1816,11 @@ void calculateMotorSpeeds()
         int pitchInput = map(receivedControl.pitch, -3000, 3000, -200, 200);
         int yawInput = map(receivedControl.yaw, -3000, 3000, -150, 150);
 
-        // Standard X-configuration mixing
-        motorSpeeds[0] = baseThrottle + rollInput + pitchInput - yawInput; // Front Right (CCW)
-        motorSpeeds[1] = baseThrottle + rollInput - pitchInput + yawInput; // Back Right (CW)
-        motorSpeeds[2] = baseThrottle - rollInput + pitchInput + yawInput; // Front Left (CW)
-        motorSpeeds[3] = baseThrottle - rollInput - pitchInput - yawInput; // Back Left (CCW)
+        // Standard X-configuration mixing - CORRECTED ROLL DIRECTION
+        motorSpeeds[0] = baseThrottle - rollInput + pitchInput - yawInput; // Front Right (CCW)
+        motorSpeeds[1] = baseThrottle - rollInput - pitchInput + yawInput; // Back Right (CW)
+        motorSpeeds[2] = baseThrottle + rollInput + pitchInput + yawInput; // Front Left (CW)
+        motorSpeeds[3] = baseThrottle + rollInput - pitchInput - yawInput; // Back Left (CCW)
     }
     else if (currentFlightMode >= FLIGHT_MODE_STABILIZE)
     {
@@ -1684,12 +1832,12 @@ void calculateMotorSpeeds()
             adjustedBaseThrottle += altitudeCorrection;
         }
 
-        // Apply PID corrections to motor mixing
+        // Apply PID corrections to motor mixing - CORRECTED ROLL DIRECTION
         // Standard X-configuration with PID corrections
-        motorSpeeds[0] = adjustedBaseThrottle + rollCorrection + pitchCorrection - yawCorrection; // Front Right (CCW)
-        motorSpeeds[1] = adjustedBaseThrottle + rollCorrection - pitchCorrection + yawCorrection; // Back Right (CW)
-        motorSpeeds[2] = adjustedBaseThrottle - rollCorrection + pitchCorrection + yawCorrection; // Front Left (CW)
-        motorSpeeds[3] = adjustedBaseThrottle - rollCorrection - pitchCorrection - yawCorrection; // Back Left (CCW)
+        motorSpeeds[0] = adjustedBaseThrottle - rollCorrection + pitchCorrection - yawCorrection; // Front Right (CCW)
+        motorSpeeds[1] = adjustedBaseThrottle - rollCorrection - pitchCorrection + yawCorrection; // Back Right (CW)
+        motorSpeeds[2] = adjustedBaseThrottle + rollCorrection + pitchCorrection + yawCorrection; // Front Left (CW)
+        motorSpeeds[3] = adjustedBaseThrottle + rollCorrection - pitchCorrection - yawCorrection; // Back Left (CCW)
     }
 
     // Constrain motor speeds to safe range
@@ -1698,55 +1846,162 @@ void calculateMotorSpeeds()
         motorSpeeds[i] = constrain(motorSpeeds[i], ESC_ARM_PULSE, ESC_MAX_PULSE);
     }
 
-    // Enhanced debug output with PID information (less frequent to avoid overwhelming serial)
+    // Enhanced debug output with organized layout and ESC values
     static unsigned long lastMotorDebug = 0;
     if (millis() - lastMotorDebug > 2000) // Every 2 seconds
     {
         if (xSemaphoreTake(serialMutex, pdMS_TO_TICKS(50)) == pdTRUE)
         {
-            Serial.print("Mode:");
+            Serial.println("═══════════════ FLIGHT CONTROLLER DEBUG ═══════════════");
+
+            // === SYSTEM STATUS LINE ===
+            Serial.print("🎮 SYSTEM: Armed:");
+            Serial.print(motorsArmed ? "✅YES" : "❌NO");
+            Serial.print(" | Mode:");
             switch (currentFlightMode)
             {
             case FLIGHT_MODE_DISARMED:
-                Serial.print("DISARMED");
+                Serial.print("🔒DISARMED");
                 break;
             case FLIGHT_MODE_MANUAL:
-                Serial.print("MANUAL");
+                Serial.print("🎮MANUAL");
                 break;
             case FLIGHT_MODE_STABILIZE:
-                Serial.print("STABILIZE");
+                Serial.print("🎯STABILIZE");
                 break;
             case FLIGHT_MODE_ALTITUDE_HOLD:
-                Serial.print("ALT_HOLD");
+                Serial.print("🛸ALT_HOLD");
                 break;
             default:
-                Serial.print("UNKNOWN");
+                Serial.print("❓UNKNOWN");
                 break;
             }
 
-            Serial.print(" [Armed:");
-            Serial.print(motorsArmed ? "YES" : "NO");
-            Serial.print("] T:");
-            Serial.print(throttleInput);
+            // Toggle switch states and control status
+            Serial.print(" | Toggles: SW1:");
+            Serial.print(receivedControl.toggle1 ? "ON" : "OFF");
+            Serial.print(" SW2:");
+            Serial.print(receivedControl.toggle2 ? "ON" : "OFF");
 
+            // Show control timeout status
+            unsigned long timeSinceLastControl = millis() - lastValidControl;
+            Serial.print(" | Ctrl:");
+            if (timeSinceLastControl < CONTROL_TIMEOUT_MS)
+            {
+                Serial.print("✅OK(");
+                Serial.print(timeSinceLastControl);
+                Serial.print("ms)");
+            }
+            else
+            {
+                Serial.print("❌TIMEOUT(");
+                Serial.print(timeSinceLastControl);
+                Serial.print("ms)");
+            }
+            Serial.println();
+
+            // === CONTROL INPUTS LINE ===
+            Serial.print("🎯 INPUTS: Throttle:");
+            Serial.print(receivedControl.throttle);
+            Serial.print("(");
+            Serial.print(map(receivedControl.throttle, -3000, 3000, 0, 100));
+            Serial.print("%) | Roll:");
+            Serial.print(receivedControl.roll);
+            Serial.print(" | Pitch:");
+            Serial.print(receivedControl.pitch);
+            Serial.print(" | Yaw:");
+            Serial.print(receivedControl.yaw);
+            Serial.print(" | Base ESC:");
+            Serial.print(baseThrottle);
+            Serial.println();
+
+            // === IMU DATA LINE (if available) ===
             if (currentFlightMode >= FLIGHT_MODE_STABILIZE && imuData.dataValid)
             {
-                Serial.print(" | IMU R:");
+                Serial.print("📐 IMU DATA: Roll:");
                 Serial.print(imuData.roll, 1);
-                Serial.print(" P:");
+                Serial.print("° | Pitch:");
                 Serial.print(imuData.pitch, 1);
-                Serial.print(" Y:");
+                Serial.print("° | Yaw:");
                 Serial.print(imuData.yaw, 1);
+                Serial.print("° | Rates R:");
+                Serial.print(imuData.rollRate, 1);
+                Serial.print(" P:");
+                Serial.print(imuData.pitchRate, 1);
+                Serial.print(" Y:");
+                Serial.print(imuData.yawRate, 1);
+                Serial.println();
+
+                // === PID OUTPUTS LINE ===
+                if (xSemaphoreTake(pidMutex, pdMS_TO_TICKS(5)) == pdTRUE)
+                {
+                    Serial.print("⚙️  PID OUT: Roll:");
+                    Serial.print(pidRollOutput, 1);
+                    Serial.print(" | Pitch:");
+                    Serial.print(pidPitchOutput, 1);
+                    Serial.print(" | Yaw:");
+                    Serial.print(pidYawOutput, 1);
+                    if (currentFlightMode >= FLIGHT_MODE_ALTITUDE_HOLD)
+                    {
+                        Serial.print(" | Alt:");
+                        Serial.print(pidAltitudeOutput, 1);
+                    }
+                    Serial.println();
+                    xSemaphoreGive(pidMutex);
+                }
+            }
+            else if (!imuData.dataValid && currentFlightMode >= FLIGHT_MODE_STABILIZE)
+            {
+                Serial.println("📐 IMU DATA: ❌ Invalid - PID disabled");
             }
 
-            Serial.print(" | Motors:");
-            Serial.print(motorSpeeds[0]);
-            Serial.print(",");
-            Serial.print(motorSpeeds[1]);
-            Serial.print(",");
+            // === MOTOR OUTPUTS LINE (X-Configuration Layout) ===
+            Serial.print("🚁 MOTORS: ");
+            Serial.print("FL(");
+            Serial.print(motorSpeeds[2]); // Front Left
+            Serial.print(") ");
+            Serial.print("FR(");
+            Serial.print(motorSpeeds[0]); // Front Right
+            Serial.print(") ");
+            Serial.print("BL(");
+            Serial.print(motorSpeeds[3]); // Back Left
+            Serial.print(") ");
+            Serial.print("BR(");
+            Serial.print(motorSpeeds[1]); // Back Right
+            Serial.print(")");
+
+            // Show range and percentages
+            Serial.print(" | Range:");
+            Serial.print(ESC_ARM_PULSE);
+            Serial.print("-");
+            Serial.print(ESC_MAX_PULSE);
+            Serial.print("µs");
+            Serial.println();
+
+            // === MOTOR VISUAL LAYOUT ===
+            Serial.println("    FRONT");
+            Serial.print("  FL[");
             Serial.print(motorSpeeds[2]);
-            Serial.print(",");
-            Serial.println(motorSpeeds[3]);
+            Serial.print("]     FR[");
+            Serial.print(motorSpeeds[0]);
+            Serial.println("]");
+            Serial.println("   CW \\     / CCW");
+            Serial.println("       \\ X /");
+            Serial.println("  CCW /     \\ CW");
+            Serial.print("  BL[");
+            Serial.print(motorSpeeds[3]);
+            Serial.print("]     BR[");
+            Serial.print(motorSpeeds[1]);
+            Serial.println("]");
+            Serial.println("    BACK");
+
+            // === PERFORMANCE METRICS ===
+            Serial.print("📊 PERFORMANCE: Free Heap:");
+            Serial.print(ESP.getFreeHeap());
+            Serial.print(" bytes | Tasks Running: Sensor+Radio+Status+Motor+IMU+PID");
+            Serial.println();
+
+            Serial.println("═══════════════════════════════════════════════════════");
             xSemaphoreGive(serialMutex);
         }
         lastMotorDebug = millis();
@@ -1819,7 +2074,9 @@ void initializeIMUAndPID()
                            -PID_ALTITUDE_MAX, PID_ALTITUDE_MAX);
     altitudePID.setDerivativeFilter(pidConfig.alt_filter);
     altitudePID.setSetpointSmoothing(pidConfig.alt_smooth);
-    altitudePID.setIntegralLimits(0.3, 0.3); // 30% of output range for altitude integral    // Initialize IMU data structure
+    altitudePID.setIntegralLimits(0.3, 0.3); // 30% of output range for altitude integral
+
+    // Initialize IMU data structure
     imuData.dataValid = false;
     imuData.timestamp = 0;
 
@@ -1915,6 +2172,42 @@ void imuTask(void *parameter)
                     float rollAccCal = roll_acc - imuCalibration.rollOffset;
                     float pitchAccCal = pitch_acc - imuCalibration.pitchOffset;
 
+                    // Enhanced yaw drift correction
+                    // Check if drone is stationary (low angular rates on all axes)
+                    float totalAngularRate = abs(gyroXCal) + abs(gyroYCal) + abs(gyroZCal);
+                    if (totalAngularRate < 1.0 && !motorsArmed) // Less than 1 deg/s on all axes and disarmed
+                    {
+                        if (!isStationary)
+                        {
+                            isStationary = true;
+                            stationaryStartTime = millis();
+                        }
+                        else if (millis() - stationaryStartTime > STATIONARY_THRESHOLD_TIME)
+                        {
+                            // Accumulate bias samples when drone is definitely stationary
+                            if (gyroBiasSampleCount < GYRO_BIAS_SAMPLES)
+                            {
+                                gyroZBiasSum += gyroZCal;
+                                gyroBiasSampleCount++;
+                            }
+                            else
+                            {
+                                // Update adaptive bias
+                                adaptiveGyroZBias = gyroZBiasSum / GYRO_BIAS_SAMPLES;
+                                gyroZBiasSum = 0.0;
+                                gyroBiasSampleCount = 0;
+                            }
+                        }
+                    }
+                    else
+                    {
+                        isStationary = false;
+                        stationaryStartTime = millis();
+                    }
+
+                    // Apply adaptive bias correction to yaw gyro
+                    float gyroZCorrected = gyroZCal - adaptiveGyroZBias;
+
                     // Complementary filter for stable angle estimation
                     // 98% gyro integration + 2% accelerometer correction
                     float dt = 0.01; // 10ms loop time
@@ -1922,12 +2215,14 @@ void imuTask(void *parameter)
 
                     imuData.roll = alpha * (imuData.roll + gyroXCal * dt) + (1.0 - alpha) * rollAccCal;
                     imuData.pitch = alpha * (imuData.pitch + gyroYCal * dt) + (1.0 - alpha) * pitchAccCal;
-                    imuData.yaw += gyroZCal * dt; // Pure integration for yaw
+
+                    // Yaw with leaky integrator and bias correction
+                    imuData.yaw = (imuData.yaw + gyroZCorrected * dt) * YAW_LEAKY_ALPHA;
 
                     // Store calibrated angular rates
                     imuData.rollRate = gyroXCal;
                     imuData.pitchRate = gyroYCal;
-                    imuData.yawRate = gyroZCal;
+                    imuData.yawRate = gyroZCorrected; // Use bias-corrected yaw rate
 
                     imuData.dataValid = true;
                     imuData.timestamp = millis();
@@ -1952,193 +2247,199 @@ void pidControlTask(void *parameter)
     {
         if (imuCalibration.calibrated && imuData.dataValid && pidEnabled)
         {
-            if (xSemaphoreTake(imuMutex, pdMS_TO_TICKS(5)) == pdTRUE &&
-                xSemaphoreTake(controlMutex, pdMS_TO_TICKS(5)) == pdTRUE &&
-                xSemaphoreTake(pidMutex, pdMS_TO_TICKS(5)) == pdTRUE)
+            // Take mutexes in consistent order to avoid deadlock
+            if (xSemaphoreTake(controlMutex, pdMS_TO_TICKS(5)) == pdTRUE)
             {
-                // Determine flight mode and setpoints
-                updateFlightMode();
-
-                if (currentFlightMode >= FLIGHT_MODE_STABILIZE)
+                if (xSemaphoreTake(imuMutex, pdMS_TO_TICKS(5)) == pdTRUE)
                 {
-                    // Convert control inputs to angle setpoints with limits and smoothing
-                    // Apply maximum angle limits for safety
-                    float rollSetpointRaw = map(receivedControl.roll, -3000, 3000,
-                                                -pidConfig.max_angle, pidConfig.max_angle);
-                    float pitchSetpointRaw = map(receivedControl.pitch, -3000, 3000,
-                                                 -pidConfig.max_angle, pidConfig.max_angle);
-
-                    // Constrain to safe limits
-                    rollPID.setpoint = constrain(rollSetpointRaw, -pidConfig.max_angle, pidConfig.max_angle);
-                    pitchPID.setpoint = constrain(pitchSetpointRaw, -pidConfig.max_angle, pidConfig.max_angle);
-
-                    // Yaw is rate control (deg/s), not angle - apply rate limits
-                    float yawRateSetpointRaw = map(receivedControl.yaw, -3000, 3000,
-                                                   -pidConfig.max_yaw_rate, pidConfig.max_yaw_rate);
-                    yawPID.setpoint = constrain(yawRateSetpointRaw, -pidConfig.max_yaw_rate, pidConfig.max_yaw_rate);
-
-                    // Set current IMU readings as PID inputs
-                    rollPID.input = imuData.roll;
-                    pitchPID.input = imuData.pitch;
-                    yawPID.input = imuData.yawRate; // Rate control for yaw
-
-                    // Enable PID controllers
-                    rollPID.enabled = true;
-                    pitchPID.enabled = true;
-                    yawPID.enabled = true;
-
-                    // Compute PID outputs
-                    pidRollOutput = rollPID.compute();
-                    pidPitchOutput = pitchPID.compute();
-                    pidYawOutput = yawPID.compute();
-
-                    // Altitude hold mode with climb rate limiting
-                    if (currentFlightMode >= FLIGHT_MODE_ALTITUDE_HOLD)
+                    if (xSemaphoreTake(pidMutex, pdMS_TO_TICKS(5)) == pdTRUE)
                     {
-                        // Use pressure altitude for altitude hold
-                        altitudePID.input = getFilteredAltitude();
-                        altitudePID.enabled = true;
+                        // Determine flight mode and setpoints
+                        updateFlightMode();
 
-                        // Limit altitude changes to reasonable climb rate
-                        float altitudeError = altitudePID.setpoint - altitudePID.input;
-                        float maxAltitudeChange = pidConfig.max_climb_rate * (PID_LOOP_PERIOD / 1000.0);
-
-                        if (abs(altitudeError) > maxAltitudeChange)
+                        if (currentFlightMode >= FLIGHT_MODE_STABILIZE)
                         {
-                            // Gradually approach target altitude
-                            if (altitudeError > 0)
-                                altitudePID.setpoint = altitudePID.input + maxAltitudeChange;
-                            else
-                                altitudePID.setpoint = altitudePID.input - maxAltitudeChange;
-                        }
+                            // Convert control inputs to angle setpoints with limits and smoothing
+                            // Apply maximum angle limits for safety
+                            float rollSetpointRaw = map(receivedControl.roll, -3000, 3000,
+                                                        -pidConfig.max_angle, pidConfig.max_angle);
+                            float pitchSetpointRaw = map(receivedControl.pitch, -3000, 3000,
+                                                         -pidConfig.max_angle, pidConfig.max_angle);
 
-                        pidAltitudeOutput = altitudePID.compute();
-                    }
-                    else
-                    {
-                        altitudePID.enabled = false;
-                        pidAltitudeOutput = 0.0;
-                    }
-                }
-                else
-                {
-                    // Manual mode - disable all PID controllers
-                    rollPID.enabled = false;
-                    pitchPID.enabled = false;
-                    yawPID.enabled = false;
-                    altitudePID.enabled = false;
+                            // Constrain to safe limits
+                            rollPID.setpoint = constrain(rollSetpointRaw, -pidConfig.max_angle, pidConfig.max_angle);
+                            pitchPID.setpoint = constrain(pitchSetpointRaw, -pidConfig.max_angle, pidConfig.max_angle);
 
-                    pidRollOutput = 0.0;
-                    pidPitchOutput = 0.0;
-                    pidYawOutput = 0.0;
-                    pidAltitudeOutput = 0.0;
-                }
+                            // Yaw is rate control (deg/s), not angle - apply rate limits
+                            float yawRateSetpointRaw = map(receivedControl.yaw, -3000, 3000,
+                                                           -pidConfig.max_yaw_rate, pidConfig.max_yaw_rate);
+                            yawPID.setpoint = constrain(yawRateSetpointRaw, -pidConfig.max_yaw_rate, pidConfig.max_yaw_rate);
 
-                xSemaphoreGive(pidMutex);
-                xSemaphoreGive(controlMutex);
-                xSemaphoreGive(imuMutex);
+                            // Set current IMU readings as PID inputs
+                            rollPID.input = imuData.roll;
+                            pitchPID.input = imuData.pitch;
+                            yawPID.input = imuData.yawRate; // Rate control for yaw
 
-                // Enhanced debugging output every 100 cycles (2 seconds at 50Hz)
-                static int debugCounter = 0;
-                if (++debugCounter >= 100)
-                {
-                    debugCounter = 0;
+                            // Enable PID controllers
+                            rollPID.enabled = true;
+                            pitchPID.enabled = true;
+                            yawPID.enabled = true;
 
-                    if (enableVerboseLogging && currentFlightMode >= FLIGHT_MODE_STABILIZE)
-                    {
-                        if (xSemaphoreTake(serialMutex, pdMS_TO_TICKS(50)) == pdTRUE)
-                        {
-                            // PID diagnostic information
-                            Serial.print("PID Diagnostics - Mode: ");
-                            Serial.print(currentFlightMode);
-                            Serial.println();
+                            // Compute PID outputs
+                            pidRollOutput = rollPID.compute();
+                            pidPitchOutput = pitchPID.compute();
+                            pidYawOutput = yawPID.compute();
 
-                            // Roll axis diagnostics
-                            Serial.print("  Roll: SP=");
-                            Serial.print(rollPID.setpoint, 1);
-                            Serial.print(" IN=");
-                            Serial.print(rollPID.input, 1);
-                            Serial.print(" OUT=");
-                            Serial.print(pidRollOutput, 1);
-                            Serial.print(" [P=");
-                            Serial.print(rollPID.proportional_term, 1);
-                            Serial.print(" I=");
-                            Serial.print(rollPID.integral_term, 1);
-                            Serial.print(" D=");
-                            Serial.print(rollPID.derivative_term, 1);
-                            Serial.print("]");
-                            if (rollPID.output_saturated)
-                                Serial.print(" SAT");
-                            if (rollPID.integral_saturated)
-                                Serial.print(" I-SAT");
-                            Serial.println();
-
-                            // Pitch axis diagnostics
-                            Serial.print("  Pitch: SP=");
-                            Serial.print(pitchPID.setpoint, 1);
-                            Serial.print(" IN=");
-                            Serial.print(pitchPID.input, 1);
-                            Serial.print(" OUT=");
-                            Serial.print(pidPitchOutput, 1);
-                            Serial.print(" [P=");
-                            Serial.print(pitchPID.proportional_term, 1);
-                            Serial.print(" I=");
-                            Serial.print(pitchPID.integral_term, 1);
-                            Serial.print(" D=");
-                            Serial.print(pitchPID.derivative_term, 1);
-                            Serial.print("]");
-                            if (pitchPID.output_saturated)
-                                Serial.print(" SAT");
-                            if (pitchPID.integral_saturated)
-                                Serial.print(" I-SAT");
-                            Serial.println();
-
-                            // Yaw axis diagnostics (rate control)
-                            Serial.print("  Yaw: SP=");
-                            Serial.print(yawPID.setpoint, 1);
-                            Serial.print(" IN=");
-                            Serial.print(yawPID.input, 1);
-                            Serial.print(" OUT=");
-                            Serial.print(pidYawOutput, 1);
-                            Serial.print(" [P=");
-                            Serial.print(yawPID.proportional_term, 1);
-                            Serial.print(" I=");
-                            Serial.print(yawPID.integral_term, 1);
-                            Serial.print(" D=");
-                            Serial.print(yawPID.derivative_term, 1);
-                            Serial.print("]");
-                            if (yawPID.output_saturated)
-                                Serial.print(" SAT");
-                            if (yawPID.integral_saturated)
-                                Serial.print(" I-SAT");
-                            Serial.println();
-
-                            // Altitude diagnostics if in altitude hold
+                            // Altitude hold mode with climb rate limiting
                             if (currentFlightMode >= FLIGHT_MODE_ALTITUDE_HOLD)
                             {
-                                Serial.print("  Alt: SP=");
-                                Serial.print(altitudePID.setpoint, 2);
-                                Serial.print(" IN=");
-                                Serial.print(altitudePID.input, 2);
-                                Serial.print(" OUT=");
-                                Serial.print(pidAltitudeOutput, 1);
-                                Serial.print(" [P=");
-                                Serial.print(altitudePID.proportional_term, 1);
-                                Serial.print(" I=");
-                                Serial.print(altitudePID.integral_term, 1);
-                                Serial.print(" D=");
-                                Serial.print(altitudePID.derivative_term, 1);
-                                Serial.print("]");
-                                if (altitudePID.output_saturated)
-                                    Serial.print(" SAT");
-                                if (altitudePID.integral_saturated)
-                                    Serial.print(" I-SAT");
-                                Serial.println();
-                            }
+                                // Use pressure altitude for altitude hold
+                                altitudePID.input = getFilteredAltitude();
+                                altitudePID.enabled = true;
 
-                            Serial.println("---");
-                            xSemaphoreGive(serialMutex);
+                                // Limit altitude changes to reasonable climb rate
+                                float altitudeError = altitudePID.setpoint - altitudePID.input;
+                                float maxAltitudeChange = pidConfig.max_climb_rate * (PID_LOOP_PERIOD / 1000.0);
+
+                                if (abs(altitudeError) > maxAltitudeChange)
+                                {
+                                    // Gradually approach target altitude
+                                    if (altitudeError > 0)
+                                        altitudePID.setpoint = altitudePID.input + maxAltitudeChange;
+                                    else
+                                        altitudePID.setpoint = altitudePID.input - maxAltitudeChange;
+                                }
+
+                                pidAltitudeOutput = altitudePID.compute();
+                            }
+                            else
+                            {
+                                altitudePID.enabled = false;
+                                pidAltitudeOutput = 0.0;
+                            }
                         }
+                        else
+                        {
+                            // Manual mode - disable all PID controllers
+                            rollPID.enabled = false;
+                            pitchPID.enabled = false;
+                            yawPID.enabled = false;
+                            altitudePID.enabled = false;
+
+                            pidRollOutput = 0.0;
+                            pidPitchOutput = 0.0;
+                            pidYawOutput = 0.0;
+                            pidAltitudeOutput = 0.0;
+                        }
+
+                        // Release mutexes in reverse order
+                        xSemaphoreGive(pidMutex);
+                    }
+                    xSemaphoreGive(imuMutex);
+                }
+                xSemaphoreGive(controlMutex);
+            }
+
+            // Enhanced debugging output every 100 cycles (2 seconds at 50Hz)
+            static int debugCounter = 0;
+            if (++debugCounter >= 100)
+            {
+                debugCounter = 0;
+
+                if (enableVerboseLogging && currentFlightMode >= FLIGHT_MODE_STABILIZE)
+                {
+                    if (xSemaphoreTake(serialMutex, pdMS_TO_TICKS(50)) == pdTRUE)
+                    {
+                        // PID diagnostic information
+                        Serial.print("PID Diagnostics - Mode: ");
+                        Serial.print(currentFlightMode);
+                        Serial.println();
+
+                        // Roll axis diagnostics
+                        Serial.print("  Roll: SP=");
+                        Serial.print(rollPID.setpoint, 1);
+                        Serial.print(" IN=");
+                        Serial.print(rollPID.input, 1);
+                        Serial.print(" OUT=");
+                        Serial.print(pidRollOutput, 1);
+                        Serial.print(" [P=");
+                        Serial.print(rollPID.getProportionalTerm(), 1);
+                        Serial.print(" I=");
+                        Serial.print(rollPID.getIntegralTerm(), 1);
+                        Serial.print(" D=");
+                        Serial.print(rollPID.getDerivativeTerm(), 1);
+                        Serial.print("]");
+                        if (rollPID.isOutputSaturated())
+                            Serial.print(" SAT");
+                        if (rollPID.isIntegralSaturated())
+                            Serial.print(" I-SAT");
+                        Serial.println();
+
+                        // Pitch axis diagnostics
+                        Serial.print("  Pitch: SP=");
+                        Serial.print(pitchPID.setpoint, 1);
+                        Serial.print(" IN=");
+                        Serial.print(pitchPID.input, 1);
+                        Serial.print(" OUT=");
+                        Serial.print(pidPitchOutput, 1);
+                        Serial.print(" [P=");
+                        Serial.print(pitchPID.getProportionalTerm(), 1);
+                        Serial.print(" I=");
+                        Serial.print(pitchPID.getIntegralTerm(), 1);
+                        Serial.print(" D=");
+                        Serial.print(pitchPID.getDerivativeTerm(), 1);
+                        Serial.print("]");
+                        if (pitchPID.isOutputSaturated())
+                            Serial.print(" SAT");
+                        if (pitchPID.isIntegralSaturated())
+                            Serial.print(" I-SAT");
+                        Serial.println();
+
+                        // Yaw axis diagnostics (rate control)
+                        Serial.print("  Yaw: SP=");
+                        Serial.print(yawPID.setpoint, 1);
+                        Serial.print(" IN=");
+                        Serial.print(yawPID.input, 1);
+                        Serial.print(" OUT=");
+                        Serial.print(pidYawOutput, 1);
+                        Serial.print(" [P=");
+                        Serial.print(yawPID.getProportionalTerm(), 1);
+                        Serial.print(" I=");
+                        Serial.print(yawPID.getIntegralTerm(), 1);
+                        Serial.print(" D=");
+                        Serial.print(yawPID.getDerivativeTerm(), 1);
+                        Serial.print("]");
+                        if (yawPID.isOutputSaturated())
+                            Serial.print(" SAT");
+                        if (yawPID.isIntegralSaturated())
+                            Serial.print(" I-SAT");
+                        Serial.println();
+
+                        // Altitude diagnostics if in altitude hold
+                        if (currentFlightMode >= FLIGHT_MODE_ALTITUDE_HOLD)
+                        {
+                            Serial.print("  Alt: SP=");
+                            Serial.print(altitudePID.setpoint, 2);
+                            Serial.print(" IN=");
+                            Serial.print(altitudePID.input, 2);
+                            Serial.print(" OUT=");
+                            Serial.print(pidAltitudeOutput, 1);
+                            Serial.print(" [P=");
+                            Serial.print(altitudePID.getProportionalTerm(), 1);
+                            Serial.print(" I=");
+                            Serial.print(altitudePID.getIntegralTerm(), 1);
+                            Serial.print(" D=");
+                            Serial.print(altitudePID.getDerivativeTerm(), 1);
+                            Serial.print("]");
+                            if (altitudePID.isOutputSaturated())
+                                Serial.print(" SAT");
+                            if (altitudePID.isIntegralSaturated())
+                                Serial.print(" I-SAT");
+                            Serial.println();
+                        }
+
+                        Serial.println("---");
+                        xSemaphoreGive(serialMutex);
                     }
                 }
             }
@@ -2166,13 +2467,20 @@ void updateFlightMode()
 {
     static FlightMode previousMode = FLIGHT_MODE_DISARMED;
 
-    if (!motorsArmed || emergencyStop)
+    if (!motorsArmed)
     {
         currentFlightMode = FLIGHT_MODE_DISARMED;
         pidEnabled = false;
     }
     else
     {
+        // If motors are armed but still in disarmed mode, switch to manual
+        if (currentFlightMode == FLIGHT_MODE_DISARMED)
+        {
+            currentFlightMode = FLIGHT_MODE_MANUAL;
+            pidEnabled = false;
+        }
+
         // Check joystick button states for mode switching
         // Joy1 button: Toggle between Manual and Stabilize
         // Joy2 button: Enable altitude hold (if in stabilize mode)

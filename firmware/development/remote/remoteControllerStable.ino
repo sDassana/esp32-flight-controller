@@ -97,6 +97,20 @@ bool telemetryReceived = false;
 bool firebaseReady = false;
 bool wifiConnected = false;
 
+// Virtual Throttle Mode variables
+int16_t virtualThrottle = 0;           // Current virtual throttle value (0 to 3000)
+const int16_t THROTTLE_DEADZONE = 200; // Deadzone around center (±200)
+const int16_t THROTTLE_RATE = 15;      // Throttle change rate per update
+const int16_t THROTTLE_MIN = 0;        // Minimum throttle value (0% power)
+const int16_t THROTTLE_MAX = 3000;     // Maximum throttle value (100% power)
+const int16_t CONTROL_DEADZONE = 150;  // Deadzone for roll/pitch/yaw controls
+
+// Safety and control mode variables
+bool isArmed = false;              // Arm/disarm state (Toggle 1)
+bool stabilizeModeEnabled = false; // Flight mode state (Toggle 2: OFF=Manual, ON=Stabilize)
+bool lastToggle1State = false;     // For edge detection
+bool lastToggle2State = false;     // For edge detection
+
 // Statistics tracking
 int successCount = 0;
 int failCount = 0;
@@ -130,6 +144,15 @@ void setup()
     controlData.joy2_btn = 1; // Released
     controlData.toggle1 = 0;  // Off
     controlData.toggle2 = 0;  // Off
+
+    // Initialize virtual throttle
+    virtualThrottle = 0;
+
+    // Initialize safety states
+    isArmed = false;
+    stabilizeModeEnabled = false;
+    lastToggle1State = false;
+    lastToggle2State = false;
 
     // Initialize radio with PROVEN configuration
     SPI.begin();
@@ -173,7 +196,7 @@ void setup()
         Serial.println("Firebase disabled - running in offline mode");
     }
 
-    Serial.print("Starting PROVEN control transmission (5Hz) with telemetry");
+    Serial.print("Starting PROVEN control transmission (5Hz) with virtual throttle mode");
     if (FIREBASE_ENABLED)
     {
         Serial.print(" and cloud upload every ");
@@ -185,7 +208,24 @@ void setup()
         Serial.println(" (Firebase disabled)...");
     }
 
-    // Print radio configuration for debugging
+    Serial.println("Virtual Throttle Mode Features:");
+    Serial.print("  - Deadzone: ±");
+    Serial.print(THROTTLE_DEADZONE);
+    Serial.print(", Rate: ");
+    Serial.print(THROTTLE_RATE);
+    Serial.print("/update, Range: ");
+    Serial.print(THROTTLE_MIN);
+    Serial.print(" to ");
+    Serial.print(THROTTLE_MAX);
+    Serial.println(" (0-100% power)");
+
+    Serial.println("Safety Features:");
+    Serial.println("  - Toggle 1: ARM/DISARM (must be ON to control throttle)");
+    Serial.println("  - Toggle 2: FLIGHT MODE (OFF=Manual, ON=Stabilize)");
+
+    Serial.println("Throttle Mapping:");
+    Serial.println("  - Virtual 0 = Transmitted -3000 (0% power)");
+    Serial.println("  - Virtual 3000 = Transmitted +3000 (100% power)"); // Print radio configuration for debugging
     Serial.println("Radio Configuration:");
     Serial.print("  Power Level: RF24_PA_HIGH");
     Serial.print(", Data Rate: RF24_250KBPS");
@@ -250,6 +290,9 @@ void loop()
 
     // Small delay to prevent overwhelming the system
     delay(10);
+
+    // Handle toggle switch safety features
+    handleSafetyToggleSwitches();
 }
 
 void readJoystickInputs()
@@ -264,14 +307,89 @@ void readJoystickInputs()
     controlData.joy2_btn = digitalRead(JOY2_BTN_PIN);
 
     // Read toggle switches (active LOW, so invert the reading)
-    controlData.toggle1 = !digitalRead(TOGGLE_SW1_PIN); // Invert: 0=off, 1=on
-    controlData.toggle2 = !digitalRead(TOGGLE_SW2_PIN); // Invert: 0=off, 1=on
+    controlData.toggle1 = !digitalRead(TOGGLE_SW1_PIN); // ARM/DISARM switch
+    controlData.toggle2 = !digitalRead(TOGGLE_SW2_PIN); // FLIGHT MODE switch (OFF=Manual, ON=Stabilize)
 
-    // Map analog readings to control values (larger range = lower sensitivity)
-    controlData.throttle = map(joy1_y, 0, 4095, -3000, 3000);
-    controlData.yaw = map(joy1_x, 0, 4095, -3000, 3000);
-    controlData.roll = map(joy2_x, 0, 4095, -3000, 3000);
-    controlData.pitch = map(joy2_y, 0, 4095, -3000, 3000);
+    // === VIRTUAL THROTTLE MODE ===
+    // Only process throttle if armed (Toggle 1 ON)
+    if (isArmed)
+    {
+        // Map joystick Y to throttle rate (-3000 to 3000 range)
+        int16_t throttleInput = map(joy1_y, 0, 4095, -3000, 3000);
+
+        // Apply deadzone filtering for throttle
+        if (abs(throttleInput) < THROTTLE_DEADZONE)
+        {
+            throttleInput = 0; // No change when in deadzone
+        }
+
+        // Calculate throttle change rate based on stick position
+        int16_t throttleChange = 0;
+        if (throttleInput > THROTTLE_DEADZONE)
+        {
+            // Stick pushed up = increase throttle
+            throttleChange = map(throttleInput, THROTTLE_DEADZONE, 3000, 1, THROTTLE_RATE);
+        }
+        else if (throttleInput < -THROTTLE_DEADZONE)
+        {
+            // Stick pulled down = decrease throttle
+            throttleChange = map(throttleInput, -3000, -THROTTLE_DEADZONE, -THROTTLE_RATE, -1);
+        }
+
+        // Update virtual throttle with rate limiting
+        virtualThrottle += throttleChange;
+
+        // Constrain virtual throttle to limits (0 to 3000)
+        if (virtualThrottle > THROTTLE_MAX)
+            virtualThrottle = THROTTLE_MAX;
+        if (virtualThrottle < THROTTLE_MIN)
+            virtualThrottle = THROTTLE_MIN;
+
+        // Convert virtual throttle to absolute transmission value
+        // Virtual 0-3000 maps to transmitted -3000 to +3000
+        controlData.throttle = map(virtualThrottle, 0, 3000, -3000, 3000);
+    }
+    else
+    {
+        // Disarmed - throttle locked to minimum
+        controlData.throttle = -3000; // Send minimum throttle value
+        virtualThrottle = 0;          // Reset virtual throttle when disarmed
+    }
+
+    // === STANDARD CONTROLS WITH DEADZONE ===
+    // Only process other controls if armed
+    if (isArmed)
+    {
+        // Map other controls with deadzone filtering
+        int16_t yawInput = map(joy1_x, 0, 4095, -3000, 3000);
+        int16_t rollInput = map(joy2_x, 0, 4095, -3000, 3000);
+        int16_t pitchInput = map(joy2_y, 0, 4095, -3000, 3000);
+
+        // Apply deadzone filtering for other controls
+        controlData.yaw = (abs(yawInput) < CONTROL_DEADZONE) ? 0 : yawInput;
+        controlData.roll = (abs(rollInput) < CONTROL_DEADZONE) ? 0 : rollInput;
+        controlData.pitch = (abs(pitchInput) < CONTROL_DEADZONE) ? 0 : pitchInput;
+    }
+    else
+    {
+        // Disarmed - all controls locked to 0
+        controlData.yaw = 0;
+        controlData.roll = 0;
+        controlData.pitch = 0;
+    }
+
+    // Manual throttle reset with Joy2 button
+    if (controlData.joy2_btn == 0) // JOY2 button pressed
+    {
+        virtualThrottle = 0;
+        controlData.throttle = -3000; // Send minimum throttle value
+        static unsigned long lastResetMessage = 0;
+        if (millis() - lastResetMessage > 1000) // Print reset message every 1 second max
+        {
+            Serial.println("🔄 Manual throttle RESET to 0% (JOY2 button)");
+            lastResetMessage = millis();
+        }
+    }
 }
 
 void sendControlData()
@@ -310,12 +428,12 @@ void sendControlData()
     else
     {
         failCount++;
-        // Print failures occasionally
+        // Print failures with better formatting
         if (failCount % 10 == 0) // Every 10 failures
         {
-            Serial.print("Packet #");
+            Serial.print("❌ Communication Failed: Packet #");
             Serial.print(packetNumber);
-            Serial.print(" FAILED after ");
+            Serial.print(" failed after ");
             Serial.print(attempts);
             Serial.println(" attempts");
         }
@@ -326,11 +444,25 @@ void sendControlData()
 
 void printTelemetryData()
 {
-    Serial.print("Packet #");
+    // === CONTROL STATUS LINE ===
+    Serial.print("📊 Packet #");
     Serial.print(packetNumber);
-    Serial.print(" SUCCESS");
-    Serial.print(" - T:");
+    Serial.print(" | Controls: VT:");
     Serial.print(controlData.throttle);
+    Serial.print("(");
+    Serial.print((virtualThrottle * 100) / 3000); // Show percentage
+    Serial.print("%) ");
+
+    // Debug throttle mapping
+    if (controlData.throttle >= 0)
+    {
+        Serial.print("✅POSITIVE");
+    }
+    else
+    {
+        Serial.print("❌NEGATIVE");
+    }
+
     Serial.print(" R:");
     Serial.print(controlData.roll);
     Serial.print(" P:");
@@ -338,76 +470,161 @@ void printTelemetryData()
     Serial.print(" Y:");
     Serial.print(controlData.yaw);
 
-    // Show button states when pressed
-    if (controlData.joy1_btn == 0)
-        Serial.print(" [JOY1-BTN]");
-    if (controlData.joy2_btn == 0)
-        Serial.print(" [JOY2-BTN]");
+    // === SAFETY STATUS ===
+    Serial.print(" | Safety: ");
+    if (isArmed)
+        Serial.print("🔓ARMED");
+    else
+        Serial.print("🔒DISARMED");
 
-    // Show toggle switch states
-    if (controlData.toggle1 == 1)
-        Serial.print(" [SW1-ON]");
+    // === FLIGHT MODE STATUS ===
+    Serial.print(" | Mode: ");
     if (controlData.toggle2 == 1)
-        Serial.print(" [SW2-ON]");
+        Serial.print("🎯STABILIZE");
+    else
+        Serial.print("🎮MANUAL");
 
-    Serial.print(" | Telemetry - Temp:");
-    Serial.print(telemetryData.temperature / 100.0);
-    Serial.print("°C Press:");
-    Serial.print(telemetryData.pressure / 10.0);
-    Serial.print("hPa Alt:");
-    Serial.print(telemetryData.altitude / 100.0, 2); // Display altitude in meters with 2 decimals
-    Serial.print("m Hum:");
+    // === THROTTLE STATUS ===
+    Serial.print(" | Thr: ");
+    if (virtualThrottle == 0)
+    {
+        Serial.print("IDLE");
+    }
+    else if (virtualThrottle < 300)
+    {
+        Serial.print("LOW");
+    }
+    else if (virtualThrottle < 1500)
+    {
+        Serial.print("MED");
+    }
+    else
+    {
+        Serial.print("HIGH");
+    }
+
+    // === INPUT STATUS ===
+    Serial.print(" | Inputs:");
+    if (controlData.joy1_btn == 0)
+        Serial.print(" JOY1");
+    if (controlData.joy2_btn == 0)
+        Serial.print(" JOY2");
+    if (controlData.toggle1 == 1)
+        Serial.print(" SW1");
+    if (controlData.toggle2 == 1)
+        Serial.print(" SW2");
+
+    Serial.println(); // End control line
+
+    // === ENVIRONMENTAL DATA LINE ===
+    Serial.print("🌡️  Environment: ");
+    Serial.print("Temp:");
+    Serial.print(telemetryData.temperature / 100.0, 1);
+    Serial.print("°C | Press:");
+    Serial.print(telemetryData.pressure / 10.0, 1);
+    Serial.print("hPa | Hum:");
     Serial.print(telemetryData.humidity);
-    Serial.print("% GPS:");
-    Serial.print(telemetryData.satellites);
-    Serial.print(" sats Lat:");
-    Serial.print(telemetryData.latitude / 100.0, 2);
-    Serial.print(" Lng:");
-    Serial.print(telemetryData.longitude / 100.0, 2);
-    Serial.print(" Batt:");
+    Serial.print("% | Alt:");
+    Serial.print(telemetryData.altitude / 100.0, 2);
+    Serial.println("m");
+
+    // === POWER & GPS LINE ===
+    Serial.print("⚡ Power & GPS: ");
+    Serial.print("Batt:");
     Serial.print(telemetryData.battery);
-    Serial.print("mV Lux:");
+    Serial.print("mV | GPS:");
+    Serial.print(telemetryData.satellites);
+    Serial.print("sats ");
+    if (telemetryData.satellites > 0)
+    {
+        Serial.print("(");
+        Serial.print(telemetryData.latitude / 100.0, 4);
+        Serial.print(",");
+        Serial.print(telemetryData.longitude / 100.0, 4);
+        Serial.print(")");
+    }
+    else
+    {
+        Serial.print("(No Fix)");
+    }
+    Serial.println();
+
+    // === AIR QUALITY LINE ===
+    Serial.print("🌬️  Air Quality: ");
+    Serial.print("Light:");
     Serial.print(telemetryData.lux);
-    Serial.print("lx UV:");
-    Serial.print(telemetryData.uvIndex / 100.0);
-    Serial.print(" CO2:");
+    Serial.print("lx | UV:");
+    Serial.print(telemetryData.uvIndex / 100.0, 2);
+    Serial.print(" | CO2:");
     Serial.print(telemetryData.eCO2);
-    Serial.print("ppm TVOC:");
+    Serial.print("ppm | TVOC:");
     Serial.print(telemetryData.TVOC);
     Serial.println("ppb");
+
+    Serial.println("────────────────────────────────────────"); // Separator
 }
 
 void printStatusReport()
 {
-    Serial.print("Status - Success: ");
+    Serial.println("════════════════ STATUS REPORT ════════════════");
+
+    // === COMMUNICATION STATISTICS ===
+    Serial.print("📡 Communication: Success:");
     Serial.print(successCount);
-    Serial.print(", Failed: ");
+    Serial.print(" | Failed:");
     Serial.print(failCount);
-    Serial.print(", Telemetry: ");
+    Serial.print(" | Telemetry:");
     Serial.print(telemetryCount);
-    Serial.print(", Success rate: ");
+
     if (successCount + failCount > 0)
     {
         int successRate = (successCount * 100) / (successCount + failCount);
+        Serial.print(" | Success Rate:");
         Serial.print(successRate);
-        Serial.print("%");
+        Serial.println("%");
     }
     else
     {
-        Serial.print("N/A");
+        Serial.println(" | Success Rate: N/A");
     }
+
+    // === SYSTEM STATUS ===
+    Serial.print("🔧 System: Free Heap:");
+    Serial.print(ESP.getFreeHeap());
+    Serial.print(" bytes");
 
     if (FIREBASE_ENABLED)
     {
-        Serial.print(", WiFi: ");
-        Serial.print(wifiConnected ? "Connected" : "Disconnected");
-        Serial.print(", Firebase: ");
-        Serial.print(firebaseReady ? "Ready" : "Not Ready");
+        Serial.print(" | WiFi:");
+        Serial.print(wifiConnected ? "✅Connected" : "❌Disconnected");
+        Serial.print(" | Firebase:");
+        Serial.print(firebaseReady ? "✅Ready" : "❌Not Ready");
     }
+    Serial.println();
 
-    Serial.print(", Free heap: ");
-    Serial.print(ESP.getFreeHeap());
-    Serial.println(" bytes");
+    // === SAFETY STATUS ===
+    Serial.print("🛡️  Safety: ");
+    Serial.print(isArmed ? "🔓ARMED" : "🔒DISARMED");
+    Serial.print(" | Flight Mode: ");
+    Serial.print(stabilizeModeEnabled ? "🎯STABILIZE" : "🎮MANUAL");
+    Serial.println();
+
+    // === VIRTUAL THROTTLE STATUS ===
+    Serial.print("🎮 Virtual Throttle: Current:");
+    Serial.print(virtualThrottle);
+    Serial.print("(");
+    Serial.print((virtualThrottle * 100) / 3000);
+    Serial.print("%) | Range:");
+    Serial.print(THROTTLE_MIN);
+    Serial.print(" to ");
+    Serial.print(THROTTLE_MAX);
+    Serial.print(" | Rate:");
+    Serial.print(THROTTLE_RATE);
+    Serial.print("/update | Transmitted:");
+    Serial.print(map(virtualThrottle, 0, 3000, -3000, 3000));
+    Serial.println();
+
+    Serial.println("═══════════════════════════════════════════════");
 
     // Reset counters
     successCount = 0;
@@ -433,10 +650,10 @@ void initializeWiFi()
     if (WiFi.status() == WL_CONNECTED)
     {
         wifiConnected = true;
-        Serial.println("\n✓ WiFi connected successfully!");
-        Serial.print("IP address: ");
+        Serial.println("\n✅ WiFi connected successfully!");
+        Serial.print("🌐 IP address: ");
         Serial.println(WiFi.localIP());
-        Serial.print("Signal strength: ");
+        Serial.print("📶 Signal strength: ");
         Serial.print(WiFi.RSSI());
         Serial.println(" dBm");
 
@@ -446,8 +663,8 @@ void initializeWiFi()
     else
     {
         wifiConnected = false;
-        Serial.println("\n✗ WiFi connection failed!");
-        Serial.print("WiFi status: ");
+        Serial.println("\n❌ WiFi connection failed!");
+        Serial.print("Status code: ");
         Serial.println(WiFi.status());
     }
 }
@@ -478,7 +695,7 @@ void initializeFirebase()
     // Simple ready check
     if (Firebase.ready())
     {
-        Serial.println("✓ Firebase connected successfully!");
+        Serial.println("✅ Firebase connected successfully!");
         firebaseReady = true;
 
         // Test upload
@@ -488,18 +705,18 @@ void initializeFirebase()
 
         if (Firebase.setJSON(firebaseData, "/connection_test", testJson))
         {
-            Serial.println("✓ Firebase write test successful!");
+            Serial.println("✅ Firebase write test successful!");
         }
         else
         {
-            Serial.print("✗ Firebase write test failed: ");
+            Serial.print("❌ Firebase write test failed: ");
             Serial.println(firebaseData.errorReason());
             firebaseReady = false;
         }
     }
     else
     {
-        Serial.println("✗ Firebase not ready - will retry later");
+        Serial.println("❌ Firebase not ready - will retry later");
         firebaseReady = false;
     }
 }
@@ -538,14 +755,14 @@ void uploadTelemetryToFirebase()
         static unsigned long lastSuccessMessage = 0;
         if (millis() - lastSuccessMessage > 30000) // Print success every 30 seconds max
         {
-            Serial.println("✓ Firebase upload successful");
+            Serial.println("✅ Firebase upload successful");
             lastSuccessMessage = millis();
         }
         firebaseReady = true;
     }
     else
     {
-        Serial.print("✗ Firebase upload failed: ");
+        Serial.print("❌ Firebase upload failed: ");
         Serial.println(firebaseData.errorReason());
 
         // Mark Firebase as not ready if upload fails
@@ -553,6 +770,44 @@ void uploadTelemetryToFirebase()
             firebaseData.errorReason().indexOf("connection") >= 0)
         {
             firebaseReady = false;
+        }
+    }
+}
+
+void handleSafetyToggleSwitches()
+{
+    // Handle ARM/DISARM toggle (Toggle 1) - edge detection
+    if (controlData.toggle1 != lastToggle1State)
+    {
+        lastToggle1State = controlData.toggle1;
+
+        if (controlData.toggle1 == 1) // Toggle 1 turned ON
+        {
+            isArmed = true;
+            Serial.println("🔓 DRONE ARMED - Controls enabled");
+        }
+        else // Toggle 1 turned OFF
+        {
+            isArmed = false;
+            virtualThrottle = 0;
+            Serial.println("🔒 DRONE DISARMED - All controls locked to minimum");
+        }
+    }
+
+    // Handle FLIGHT MODE toggle (Toggle 2) - edge detection
+    if (controlData.toggle2 != lastToggle2State)
+    {
+        lastToggle2State = controlData.toggle2;
+
+        if (controlData.toggle2 == 1) // Toggle 2 turned ON
+        {
+            stabilizeModeEnabled = true;
+            Serial.println("🎯 FLIGHT MODE: STABILIZE - PID stabilization enabled");
+        }
+        else // Toggle 2 turned OFF
+        {
+            stabilizeModeEnabled = false;
+            Serial.println("🎮 FLIGHT MODE: MANUAL - Direct stick control");
         }
     }
 }
