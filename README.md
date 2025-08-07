@@ -50,7 +50,8 @@ esp32-flight-controller/
 │
 ├── 📁 docs/                  # Project documentation
 │   ├── PROJECT_PROGRESS.md   # Development progress tracking
-│   └── PIDControl.md         # PID control documentation
+│   ├── PIDControl.md         # PID control documentation
+│   └── FLIGHT_MODE_CONTROL.md # Flight mode switching system guide
 │
 ├── 📁 examples/              # Test programs and examples
 │   ├── 📁 sensor_tests/      # Individual sensor test programs
@@ -112,7 +113,39 @@ esp32-flight-controller/
 - **Data logging** with Firebase integration
 - **Web-based control interface** for testing and configuration
 
-## 🔧 Hardware Specifications
+## �️ Flight Mode System
+
+The drone features a dual flight mode system for enhanced control flexibility:
+
+### Flight Mode Controls
+
+- **Toggle 1:** ARM/DISARM (primary safety control)
+- **Toggle 2:** Flight Mode Selection (Stabilized/Manual)
+
+### Available Flight Modes
+
+#### 🎯 Manual Mode (Toggle 2 OFF)
+
+- **Direct stick control** with no stabilization assistance
+- **PID controllers disabled** for maximum control authority
+- **Best for:** Experienced pilots, advanced maneuvers, acrobatic flight
+
+#### 🛡️ Stabilized Mode (Toggle 2 ON)
+
+- **PID-assisted flight** with automatic self-leveling
+- **Roll, pitch, and yaw stabilization** for smooth control
+- **Best for:** New pilots, stable photography, hover operations
+
+### Real-time Mode Switching
+
+- Switch between modes **during flight** for optimal control
+- Seamless transitions with no motor interruption
+- Current mode displayed in **telemetry output**
+- Mode changes **logged to serial console** for monitoring
+
+**📖 Complete Documentation:** See [FLIGHT_MODE_CONTROL.md](docs/FLIGHT_MODE_CONTROL.md) for detailed operation guide
+
+## �🔧 Hardware Specifications
 
 ### 🎯 Main Controller
 

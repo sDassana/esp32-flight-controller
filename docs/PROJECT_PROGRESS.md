@@ -1,35 +1,52 @@
 # 🚁 ESP32 Weather Drone - Project Progress Documentation
 
 **Project Start Date:** August 1, 2025  
-**Last Updated:** August 7, 2025 - DRONE FIRMWARE COMPILATION FIXES COMPLETE  
-**Current Phase:** 🎉 MOTOR CONTROL SYSTEM FULLY OPERATIONAL - MINOR CONTROL MAPPING REFINEMENTS NEEDED
+**Last Updated:** August 7, 2025 - FLIGHT MODE SWITCHING SYSTEM IMPLEMENTED  
+**Current Phase:** 🎉 MOTOR CONTROL SYSTEM FULLY OPERATIONAL WITH FLIGHT MODE SWITCHING
 
 ---
 
-## 🚀 LATEST BREAKTHROUGH - DRONE FIRMWARE COMPILATION AND RUNTIME FIXES COMPLETE!
+## 🚀 LATEST BREAKTHROUGH - FLIGHT MODE SWITCHING SYSTEM COMPLETE!
 
-### ✅ CRITICAL: Drone Firmware Compilation Errors RESOLVED
+### ✅ CRITICAL: Flight Mode Switching Implementation
 
-- **Achievement:** All compilation errors in droneFreeRTOS.ino successfully fixed
-- **Issues Resolved:** Function declaration errors, brace mismatches, nested function definitions
-- **Technical Fixes Applied:**
-  - Added proper function declarations for `updateFlightMode()` and `getFilteredAltitude()`
-  - Fixed nested function definitions - moved functions outside of task contexts
-  - Corrected brace structure in `pidControlTask()` function
-  - Resolved "else without previous if" syntax errors
-  - Fixed "expected declaration before '}' token" errors
-- **Compilation Status:** ✅ **CLEAN BUILD - NO COMPILATION ERRORS**
-- **Result:** 🎉 **COMPLETE FIRMWARE READY FOR HARDWARE TESTING**
+- **Achievement:** Successfully replaced emergency stop with flight mode switching system
+- **New Control System:**
+  - **Toggle 1:** ARM/DISARM control (unchanged)
+  - **Toggle 2:** Flight Mode switching - Stabilized/Manual mode control
+- **Flight Modes Implemented:**
+  - **Toggle 2 ON:** Stabilized Mode (PID controllers active for self-leveling)
+  - **Toggle 2 OFF:** Manual Mode (direct control, no stabilization)
+- **Real-time Switching:** Pilots can switch between modes during flight
+- **Status Display:** Current flight mode shown in telemetry and status output
+- **Safety Maintained:** ARM/DISARM system still provides primary safety control
+
+### ✅ Code Synchronization Complete
+
+- **Remote Controller:** Updated to send flight mode commands via Toggle 2
+- **Drone Firmware:** Updated to receive and respond to flight mode switching
+- **Variable Management:** Added `stabilizedMode` variable for status tracking
+- **PID Integration:** PID controllers enable/disable based on flight mode
+- **Documentation:** Updated README.md and project documentation
+
+### ✅ Enhanced Flight Control Features
+
+- **Dual Flight Modes:**
+  - **Manual Mode:** Direct stick control, no assistance - for experienced pilots
+  - **Stabilized Mode:** PID-assisted flight with automatic leveling - for stable flight
+- **In-flight Switching:** Smooth transitions between manual and stabilized control
+- **Pilot Flexibility:** Allows switching to manual for advanced maneuvers or stabilized for easy flying
+- **Safety Improvement:** Removed emergency stop that could cause dangerous power loss mid-flight
 
 ### ✅ Motor Control System Validation
 
 - **Control Pipeline:** Remote controller → RF24 transmission → Drone reception → Motor control
 - **Communication Status:** 5Hz control transmission (200ms intervals) working reliably
 - **Motor Response:** ESC motors responding to joystick inputs with proper throttle mapping
-- **Safety Systems:** ARM/DISARM and Emergency Stop toggles operational
+- **Safety Systems:** ARM/DISARM and Flight Mode switching toggles operational
 - **Virtual Throttle:** 0-3000 internal range mapping to -3000 to +3000 transmission range
-- **Control Mapping:** Minor refinements needed for optimal response characteristics
-- **Overall Status:** ✅ **MOTOR CONTROL SYSTEM FULLY FUNCTIONAL**
+- **Flight Mode Control:** Toggle 2 switches between Stabilized and Manual flight modes
+- **Overall Status:** ✅ **MOTOR CONTROL SYSTEM WITH FLIGHT MODE SWITCHING FULLY FUNCTIONAL**
 
 ### ✅ Firmware Architecture Stability
 
@@ -38,7 +55,7 @@
 - **Mutex System:** Proper thread-safe access to shared data structures
 - **ESC Integration:** Immediate power-on calibration sequence working correctly
 - **PID Controllers:** Roll, Pitch, Yaw, and Altitude PID loops implemented and functional
-- **Flight Modes:** Manual, Stabilize, and Altitude Hold modes operational
+- **Flight Modes:** Manual and Stabilized modes with real-time switching capability
 - **Telemetry System:** 22-byte sensor data transmission via ACK payloads working
 
 ### ✅ Code Quality Improvements
@@ -48,6 +65,7 @@
 - **Temperature Compensation:** Fixed unit conversion bugs (/100.0 scaling corrected)
 - **Mutex Deadlock Prevention:** Implemented nested mutex acquisition order to prevent deadlocks
 - **Debug Output:** Enhanced PID diagnostic information for real-time tuning
+- **Flight Mode Integration:** Clean implementation of mode switching with status tracking
 - **Code Structure:** Clean separation of concerns with modular function design
 
 ## 🚀 MAJOR BREAKTHROUGH - RF REMOTE CONTROL WITH ESC INTEGRATION COMPLETE!
@@ -70,8 +88,19 @@
 - **Control Latency**: 200ms control intervals with immediate motor response (50Hz ESC updates)
 - **Telemetry Feedback**: 22-byte comprehensive sensor data via ACK payloads
 - **Arming System**: Explicit toggle switch control prevents accidental motor activation
-- **Emergency Stop**: Instant motor cutoff with toggle switch 2 override
+- **Flight Mode Control**: Real-time switching between Stabilized (PID) and Manual modes
 - **Control Timeout**: 1-second safety timeout stops motors if communication lost
+
+### ✅ Flight Control System Features
+
+- **Toggle Switch Controls:**
+  - **Toggle 1:** ARM/DISARM - Primary safety control
+  - **Toggle 2:** Flight Mode - Stabilized (PID ON) / Manual (PID OFF)
+- **Flight Modes:**
+  - **Manual Mode:** Direct control, no stabilization - for experienced pilots
+  - **Stabilized Mode:** PID-assisted self-leveling - for stable flight
+- **In-flight Mode Switching:** Seamless transitions between flight modes during operation
+- **Safety Priority:** ARM/DISARM system provides primary safety, flight modes enhance control
 
 ### ✅ FreeRTOS Multi-Threading Architecture COMPLETE
 
