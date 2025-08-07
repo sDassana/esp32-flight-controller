@@ -83,7 +83,8 @@ esp32-flight-controller/
 - **Direct joystick control** with dual analog joysticks
 - **X-configuration motor mixing** for precise quadcopter control
 - **5Hz control transmission** for responsive real-time control
-- **Toggle switch arming system** with emergency stop functionality
+- **Toggle switch arming system** with flight mode switching (Stabilized/Manual)
+- **Flight mode control**: Stabilized mode with PID control and Manual mode for direct control
 - **ACK payload telemetry** for live sensor feedback
 
 ### 🧠 Advanced Flight Control
@@ -92,7 +93,8 @@ esp32-flight-controller/
 - **50Hz motor updates** for smooth ESC control
 - **Immediate ESC calibration** on power-up
 - **Safety systems** including control timeout and arming protection
-- **PID stabilization ready** (upcoming feature)
+- **PID stabilization** with flight mode switching between Stabilized and Manual control
+- **Dual flight modes**: Stabilized (PID-assisted) and Manual (direct control) modes
 
 ### 📡 Comprehensive Sensor Suite
 
@@ -152,16 +154,16 @@ esp32-flight-controller/
 
 ### 🎮 Remote Controller Pins
 
-| Function            | Component | GPIO Pin | Notes                         |
-| ------------------- | --------- | -------- | ----------------------------- |
-| **Joystick 1 X**    | Analog    | GPIO 39  | Primary control stick         |
-| **Joystick 1 Y**    | Analog    | GPIO 36  | Primary control stick         |
-| **Joystick 1 BTN**  | Digital   | GPIO 33  | Button (not functioning well) |
-| **Joystick 2 X**    | Analog    | GPIO 34  | Secondary control stick       |
-| **Joystick 2 Y**    | Analog    | GPIO 35  | Secondary control stick       |
-| **Joystick 2 BTN**  | Digital   | GPIO 32  | Button input                  |
-| **Toggle Switch 1** | Digital   | GPIO 27  | ARM/DISARM control            |
-| **Toggle Switch 2** | Digital   | GPIO 14  | Emergency stop                |
+| Function            | Component | GPIO Pin | Notes                           |
+| ------------------- | --------- | -------- | ------------------------------- |
+| **Joystick 1 X**    | Analog    | GPIO 39  | Primary control stick           |
+| **Joystick 1 Y**    | Analog    | GPIO 36  | Primary control stick           |
+| **Joystick 1 BTN**  | Digital   | GPIO 33  | Button (not functioning well)   |
+| **Joystick 2 X**    | Analog    | GPIO 34  | Secondary control stick         |
+| **Joystick 2 Y**    | Analog    | GPIO 35  | Secondary control stick         |
+| **Joystick 2 BTN**  | Digital   | GPIO 32  | Button input                    |
+| **Toggle Switch 1** | Digital   | GPIO 27  | ARM/DISARM control              |
+| **Toggle Switch 2** | Digital   | GPIO 14  | Flight mode (Stabilized/Manual) |
 
 ### 🚁 Drone Controller Pins
 

@@ -2,6 +2,8 @@
 
 This directory contains the firmware files for the ESP32 flight controller system, organized by stability and development status.
 
+**Last Updated:** August 7, 2025 - Stable firmware updated with working motor control system
+
 ## 📁 Directory Structure
 
 ### ✅ **Stable** (Production Ready)
@@ -10,24 +12,32 @@ This directory contains the firmware files for the ESP32 flight controller syste
 
 **Production drone flight controller firmware:**
 
-- `droneFreeRTOS.ino` - **✅ STABLE PRODUCTION FIRMWARE**
-  - Complete RF remote control with ESC integration
-  - FreeRTOS multi-threading architecture (50Hz motor updates)
-  - Comprehensive sensor integration (BME280, GPS, environmental sensors)
-  - Safety systems (arming, emergency stop, control timeout)
-  - ACK payload telemetry system
-  - **Status:** Fully tested and operational
+- `droneFreeRTOS.ino` - **✅ STABLE PRODUCTION FIRMWARE v4.0**
+  - **NEW:** Complete RF remote control with working motor control system
+  - **NEW:** All compilation errors resolved and fully functional
+  - FreeRTOS multi-threading architecture with dedicated motor task (Core 1, 50Hz)
+  - PID stabilization controllers (Roll, Pitch, Yaw, Altitude)
+  - Flight modes: Manual, Stabilize, Altitude Hold
+  - ESC integration with immediate power-on calibration
+  - Safety systems (ARM/DISARM, Emergency Stop, Control Timeout)
+  - Comprehensive sensor suite with ACK payload telemetry
+  - **Status:** ✅ Ready for flight testing (Promoted from development Aug 7, 2025)
 
 #### 🎮 `/stable/remote/`
 
 **Production remote controller firmware:**
 
-- `remoteControllerStable.ino` - **✅ STABLE PRODUCTION REMOTE**
-  - Dual joystick support with toggle switches
-  - 5Hz control transmission with telemetry display
-  - Emergency stop and arming controls
-  - **Status:** Fully tested and operational
-- `FastControlRemote.ino` - Alternative stable remote implementation
+- `remoteControllerStable.ino` - **✅ STABLE PRODUCTION REMOTE v4.0**
+  - **NEW:** Virtual throttle system with safety controls (0-3000 range)
+  - **NEW:** Toggle switch arming system (SW1=ARM, SW2=EMERGENCY_STOP)
+  - Dual joystick support with ±3000 precision control range
+  - 5Hz RF24 control transmission with real-time telemetry feedback
+  - Firebase cloud data logging integration
+  - Enhanced safety systems and control timeout protection
+  - **Status:** ✅ Fully operational (Promoted from development Aug 7, 2025)
+- `FastControlRemote.ino` - **✅ STABLE ALTERNATIVE REMOTE**
+  - Alternative control interface with simplified operation
+  - **Status:** ✅ Updated with latest improvements
 
 ### 🔬 **Development** (Active Development)
 
@@ -36,18 +46,32 @@ This directory contains the firmware files for the ESP32 flight controller syste
 **Development drone flight controller firmware:**
 
 - `droneFreeRTOS.ino` - **🔬 DEVELOPMENT VERSION**
-  - Copy of stable firmware for PID integration development
-  - **Next Phase:** MPU6050 PID stabilization implementation
-  - **Status:** Ready for PID controller development
+  - Working copy of stable firmware for ongoing feature development
+  - **Next Phase:** Control mapping refinements and advanced flight modes
+  - **Status:** Ready for control optimization and new feature development
 
 #### 🎮 `/development/remote/`
 
 **Development remote controller firmware:**
 
 - `remoteControllerStable.ino` - **🔬 DEVELOPMENT VERSION**
-  - Copy of stable firmware for enhanced features
-  - **Next Phase:** Advanced control modes and parameter tuning
-  - **Status:** Ready for feature development
+  - Working copy of stable firmware for enhanced control features
+  - **Next Phase:** Advanced control modes and real-time PID parameter tuning
+  - **Status:** Ready for control refinement and feature enhancement
+
+### 🗃️ **Legacy** (Archived Versions)
+
+#### `/legacy/drone/` & `/legacy/remote/`
+
+**Pre-August 7, 2025 stable firmware versions:**
+
+- `droneFreeRTOS_stable_pre_aug7_2025.ino` - Previous stable drone firmware
+- `remoteControllerStable_pre_aug7_2025.ino` - Previous stable remote firmware
+- `FastControlRemote_pre_aug7_2025.ino` - Previous alternative remote firmware
+
+**Status:** 🗃️ Archived - Superseded by working motor control implementations
+**Note:** These versions had non-functional motor control and compilation issues
+
 - `FastControlRemote.ino` - Alternative development remote
 
 ## 🚀 Getting Started

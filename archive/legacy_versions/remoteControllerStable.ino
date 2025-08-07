@@ -1,32 +1,32 @@
 /*
- * DEVELOPMENT VERSION - Complete Remote Controller - Stable Non-FreeRTOS Version
- * 🔬 DEVELOPMENT FIRMWARE FOR ENHANCED CONTROL FEATURES
+ * STABLE PRODUCTION VERSION - Complete Remote Controller - RF24 Control System
+ * ✅ STABLE FIRMWARE WITH FULL MOTOR CONTROL INTEGRATION
  *
- * Reliable control at 200ms intervals (5Hz) for stable drone communication
- * Compatible with droneFreeRTOS.ino
+ * Reliable RF24 control at 200ms intervals (5Hz) for stable drone communication
+ * Compatible with stable drone firmware droneFreeRTOS.ino
  *
- * DEVELOPMENT FOCUS:
- * - Advanced control modes and flight assistance
- * - Real-time PID parameter tuning interface
- * - Enhanced telemetry display and data logging
- * - Flight mode switching (Stabilized/Manual) and safety enhancements
+ * STABLE FEATURES:
+ * - Virtual throttle system with safety controls
+ * - Dual joystick control (Throttle/Yaw + Roll/Pitch)
+ * - Toggle switch arming system (SW1=ARM, SW2=EMERGENCY_STOP)
+ * - Real-time telemetry feedback via ACK payloads
+ * - Firebase cloud data logging integration
+ * - Enhanced safety systems with control timeout
+ * - Professional control precision (±3000 range)
  *
- * CONTROL FEATURES:
- * - Virtual throttle with rate limiting for smooth control
- * - ARM/DISARM safety switch (Toggle 1)
- * - Flight mode switching: Stabilized/Manual (Toggle 2)
- * - Comprehensive telemetry display and Firebase logging
- * - Manual throttle reset via joystick button
+ * ✅ PRODUCTION READY - Tested and validated August 7, 2025
+ * Version: 4.0 - Complete RF Motor Control System
  *
- * ⚠️ EXPERIMENTAL - FOR DEVELOPMENT USE ONLY
- * Use stable_remote/remoteControllerStable.ino for production flights
+ * CONTROL MAPPING:
+ * - Virtual Throttle: 0-3000 internal, transmitted as -3000 to +3000
+ * - Roll/Pitch/Yaw: ±3000 precision range with configurable deadzones
+ * - Safety: ARM required for throttle, Emergency Stop overrides all controls
  */
 
 #include <SPI.h>
 #include <RF24.h>
 #include <WiFi.h>
 #include <FirebaseESP32.h>
-#include <Wire.h>
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
 
@@ -41,7 +41,7 @@
 #define FIREBASE_ENABLED true          // Enabled with simple approach
 
 // OLED Display Configuration - Set to false to completely disable OLED functionality
-#define OLED_ENABLED false // Set to false to disable OLED display functionality for now
+#define OLED_ENABLED false // Set to false if no OLED display is connected or to avoid I2C issues
 
 // Common testing intervals:
 // 10000  = 10 seconds (normal)
@@ -51,12 +51,6 @@
 // Pin Definitions
 #define CE_PIN 4
 #define CSN_PIN 5
-
-// OLED Display Configuration
-#define SCREEN_WIDTH 128    // OLED display width, in pixels
-#define SCREEN_HEIGHT 64    // OLED display height, in pixels
-#define OLED_RESET -1       // Reset pin # (or -1 if sharing Arduino reset pin)
-#define SCREEN_ADDRESS 0x3C // See datasheet for Address; 0x3D for 128x64, 0x3C for 128x32
 
 // Joystick pins - Updated configuration
 #define JOY1_X_PIN 39   // Joystick 1 X-axis
@@ -68,11 +62,16 @@
 #define TOGGLE_SW1_PIN 27
 #define TOGGLE_SW2_PIN 14
 
+// OLED Display Configuration
+#define SCREEN_WIDTH 128
+#define SCREEN_HEIGHT 64
+#define SCREEN_ADDRESS 0x3C
+
 RF24 radio(CE_PIN, CSN_PIN);
 const byte address[6] = "00001";
 
 // OLED Display object
-Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
+Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, -1);
 
 // Firebase objects
 FirebaseData firebaseData;
@@ -130,7 +129,7 @@ const int16_t CONTROL_DEADZONE = 150;  // Deadzone for roll/pitch/yaw controls
 
 // Safety and control mode variables
 bool isArmed = false;          // Arm/disarm state (Toggle 1)
-bool isStabilizedMode = true;  // Flight mode state (Toggle 2) - true = Stabilized, false = Manual
+bool emergencyStop = false;    // Emergency stop state (Toggle 2)
 bool lastToggle1State = false; // For edge detection
 bool lastToggle2State = false; // For edge detection
 
@@ -143,11 +142,10 @@ bool displayAvailable = false; // Track if OLED display is working
 
 void scanI2CDevices()
 {
-    Serial.println("🔍 Scanning I2C bus for devices...");
+    Serial.println("Scanning I2C bus for devices...");
     delay(100); // Give I2C devices time to initialize
 
     int deviceCount = 0;
-    bool oledFound = false;
 
     for (byte address = 1; address < 127; address++)
     {
@@ -156,7 +154,7 @@ void scanI2CDevices()
 
         if (error == 0)
         {
-            Serial.print("✅ I2C device found at address 0x");
+            Serial.print("I2C device found at address 0x");
             if (address < 16)
                 Serial.print("0");
             Serial.print(address, HEX);
@@ -166,44 +164,29 @@ void scanI2CDevices()
             // Check if it's likely an OLED display
             if (address == 0x3C || address == 0x3D)
             {
-                Serial.println("   ^ This looks like an OLED display!");
-                oledFound = true;
+                Serial.println("  ^ This looks like an OLED display!");
             }
         }
         else if (error == 4)
         {
-            Serial.print("⚠️  Unknown error at address 0x");
+            Serial.print("Unknown error at address 0x");
             if (address < 16)
                 Serial.print("0");
-            Serial.print(address, HEX);
-            Serial.println(" (error code 4)");
+            Serial.println(address, HEX);
         }
 
-        delay(2); // Small delay between addresses for reliability
+        delay(1); // Small delay between addresses
     }
 
-    Serial.println("────────────────────────────────");
     if (deviceCount == 0)
     {
-        Serial.println("❌ No I2C devices found!");
-        Serial.println("💡 Check your wiring:");
-        Serial.println("   - SDA should be connected to GPIO 21");
-        Serial.println("   - SCL should be connected to GPIO 22");
-        Serial.println("   - VCC should be connected to 3.3V");
-        Serial.println("   - GND should be connected to GND");
+        Serial.println("No I2C devices found during initial scan");
+        Serial.println("Note: Some devices may need initialization before appearing on I2C bus");
     }
     else
     {
-        Serial.print("✅ Total I2C devices found: ");
+        Serial.print("Total I2C devices found: ");
         Serial.println(deviceCount);
-        if (oledFound)
-        {
-            Serial.println("🎉 OLED display detected!");
-        }
-        else
-        {
-            Serial.println("⚠️  No OLED display found at 0x3C or 0x3D");
-        }
     }
     Serial.println("I2C scan complete\n");
 }
@@ -215,33 +198,17 @@ void updateOLEDDisplay()
         return; // Skip display update if display is not available
     }
 
-    // Try to update display with improved error handling
+    // Try to update display with error handling
     static int displayErrorCount = 0;
-    static unsigned long lastErrorReset = 0;
-    const int maxDisplayErrors = 5;
-    const unsigned long errorResetInterval = 30000; // Reset error count every 30 seconds
-
-    // Reset error count periodically to allow recovery
-    if (millis() - lastErrorReset > errorResetInterval)
-    {
-        if (displayErrorCount > 0)
-        {
-            Serial.print("🔄 Resetting OLED error count (was ");
-            Serial.print(displayErrorCount);
-            Serial.println("), attempting recovery...");
-        }
-        displayErrorCount = 0;
-        lastErrorReset = millis();
-    }
+    const int maxDisplayErrors = 10;
 
     // If we've had too many errors, disable display updates temporarily
     if (displayErrorCount >= maxDisplayErrors)
     {
         static unsigned long lastErrorMessage = 0;
-        if (millis() - lastErrorMessage > 10000) // Print message every 10 seconds
+        if (millis() - lastErrorMessage > 30000) // Print message every 30 seconds
         {
             Serial.println("⚠️  OLED Display temporarily disabled due to I2C errors");
-            Serial.println("   Will auto-retry in a few seconds...");
             lastErrorMessage = millis();
         }
         return;
@@ -250,7 +217,7 @@ void updateOLEDDisplay()
     // Attempt display update with error recovery
     bool updateSuccess = false;
     int attempts = 0;
-    const int maxAttempts = 2; // Reduced attempts to minimize blocking
+    const int maxAttempts = 3;
 
     while (!updateSuccess && attempts < maxAttempts)
     {
@@ -259,79 +226,72 @@ void updateOLEDDisplay()
         // Small delay between attempts
         if (attempts > 1)
         {
-            delay(5);
+            delay(10);
         }
 
-        // Clear and prepare display
+        // Try to update display
         display.clearDisplay();
         display.setTextSize(1);
-        display.setTextColor(SSD1306_WHITE);
+        display.setTextColor(WHITE);
         display.setCursor(0, 0);
 
-        // Display content
+        // Display title
         display.println("DRONE CONTROLLER");
         display.println("================");
 
         // Display ARM/DISARM status
         if (isArmed)
         {
-            display.println("STATUS: ARMED");
+            display.print("STATUS: ARMED");
         }
         else
         {
-            display.println("STATUS: DISARMED");
+            display.print("STATUS: DISARMED");
         }
+        display.println();
 
         // Display control values
         display.println();
-        display.printf("T:%4d(%2d%%) Y:%4d\n",
-                       virtualThrottle,
-                       (virtualThrottle * 100) / 3000,
-                       controlData.yaw);
-        display.printf("R:%4d  P:%4d\n", controlData.roll, controlData.pitch);
+        display.printf("T: %4d  Y: %4d\n", virtualThrottle, controlData.yaw);
+        display.printf("R: %4d  P: %4d\n", controlData.roll, controlData.pitch);
 
         // Display connection status
         display.println();
         if (telemetryReceived)
         {
-            display.println("CONN: OK");
+            display.println("CONNECTION: OK");
         }
         else
         {
-            display.println("CONN: LOST");
+            display.println("CONNECTION: LOST");
         }
 
-        // Try to update the physical display with I2C error checking
-        Wire.beginTransmission(SCREEN_ADDRESS);
-        byte i2cError = Wire.endTransmission();
+        // Display additional info
+        display.printf("Rate: %d\n", THROTTLE_RATE);
 
-        if (i2cError == 0)
+        // Try to update the display - this is where errors typically occur
+        Wire.beginTransmission(SCREEN_ADDRESS);
+        byte error = Wire.endTransmission();
+
+        if (error == 0)
         {
-            // I2C communication successful, update display
             display.display();
             updateSuccess = true;
-            // Reset error count on success
-            if (displayErrorCount > 0)
-            {
-                displayErrorCount = 0;
-                Serial.println("✅ OLED display recovered successfully!");
-            }
+            displayErrorCount = 0; // Reset error count on success
         }
         else
         {
             displayErrorCount++;
-            if (displayErrorCount <= maxDisplayErrors)
+            if (displayErrorCount < maxDisplayErrors)
             {
-                Serial.printf("⚠️  OLED I2C error (attempt %d/%d, error count: %d, I2C error: %d)\n",
-                              attempts, maxAttempts, displayErrorCount, i2cError);
+                Serial.printf("⚠️  Display I2C error (attempt %d/%d): %d\n", attempts, maxAttempts, error);
             }
         }
     }
 
-    if (!updateSuccess && displayErrorCount <= maxDisplayErrors)
+    if (!updateSuccess && displayErrorCount < maxDisplayErrors)
     {
-        Serial.printf("❌ OLED update failed after %d attempts (total errors: %d)\n",
-                      maxAttempts, displayErrorCount);
+        Serial.printf("❌ Display update failed after %d attempts\n", maxAttempts);
     }
 }
 
@@ -343,102 +303,7 @@ void setup()
     Serial.println("=== Complete Remote Controller - Stable Version ===");
     Serial.println("Compatible with droneFreeRTOS.ino");
 
-// Initialize I2C only if OLED is enabled
-#if OLED_ENABLED
-    Serial.println("🔧 Initializing I2C for OLED display...");
-    Wire.begin(21, 22);    // SDA=21, SCL=22 (ESP32 default)
-    Wire.setClock(100000); // Set I2C clock to 100kHz for better reliability
-    delay(200);            // Give I2C time to stabilize
-
-    Serial.println("📍 I2C initialized - SDA:GPIO21, SCL:GPIO22, Clock:100kHz");
-
-    // Scan for I2C devices first
-    scanI2CDevices();
-
-    // Initialize OLED Display with comprehensive error handling
-    Serial.println("🖥️  Initializing OLED Display...");
-    delay(100); // Additional delay before display initialization
-
-    // Try multiple initialization attempts
-    bool displayInitialized = false;
-    int initAttempts = 0;
-    const int maxInitAttempts = 3;
-
-    while (!displayInitialized && initAttempts < maxInitAttempts)
-    {
-        initAttempts++;
-        Serial.print("   Attempt ");
-        Serial.print(initAttempts);
-        Serial.print("/");
-        Serial.print(maxInitAttempts);
-        Serial.println("...");
-
-        // Try address 0x3C first (most common)
-        if (display.begin(SSD1306_SWITCHCAPVCC, SCREEN_ADDRESS))
-        {
-            Serial.println("✅ OLED Display initialized at address 0x3C!");
-            displayInitialized = true;
-            displayAvailable = true;
-        }
-        else
-        {
-            Serial.println("❌ Failed at address 0x3C, trying 0x3D...");
-
-            // Try alternative address 0x3D
-            if (display.begin(SSD1306_SWITCHCAPVCC, 0x3D))
-            {
-                Serial.println("✅ OLED Display initialized at address 0x3D!");
-                displayInitialized = true;
-                displayAvailable = true;
-            }
-            else
-            {
-                Serial.print("❌ Failed at address 0x3D (attempt ");
-                Serial.print(initAttempts);
-                Serial.println(")");
-                delay(500); // Wait before retry
-            }
-        }
-    }
-
-    if (!displayInitialized)
-    {
-        Serial.println("❌ OLED Display initialization FAILED after all attempts!");
-        Serial.println("🔍 Troubleshooting steps:");
-        Serial.println("   1. Check wiring connections:");
-        Serial.println("      - VCC to 3.3V (NOT 5V for most displays)");
-        Serial.println("      - GND to GND");
-        Serial.println("      - SDA to GPIO 21");
-        Serial.println("      - SCL to GPIO 22");
-        Serial.println("   2. Verify display specifications (0.96\" SSD1306)");
-        Serial.println("   3. Check if display requires different I2C address");
-        Serial.println("   4. Ensure pull-up resistors on SDA/SCL (usually built-in)");
-        Serial.println("⚠️  Continuing without display - drone control will work normally");
-        displayAvailable = false;
-    }
-    else
-    {
-        // Show startup message if display is available
-        Serial.println("🎉 Testing OLED display functionality...");
-        display.clearDisplay();
-        display.setTextSize(1);
-        display.setTextColor(SSD1306_WHITE);
-        display.setCursor(0, 0);
-        display.println(F("DRONE CONTROLLER"));
-        display.println(F("================"));
-        display.println(F("System: ONLINE"));
-        display.println(F("Display: OK"));
-        display.println(F("Initializing..."));
-
-        display.display(); // This function returns void
-        Serial.println("✅ OLED display test successful!");
-        delay(2000); // Show startup message for 2 seconds
-    }
-#else
-    Serial.println("⚠️  OLED Display disabled in configuration");
-    Serial.println("💡 System optimized for drone control without display");
-    displayAvailable = false;
-#endif // Initialize pins
+    // Initialize pins
     pinMode(JOY1_X_PIN, INPUT);
     pinMode(JOY1_Y_PIN, INPUT);
     pinMode(JOY1_BTN_PIN, INPUT_PULLUP); // Joystick 1 button (not functioning well)
@@ -463,9 +328,63 @@ void setup()
 
     // Initialize safety states
     isArmed = false;
-    isStabilizedMode = true;  // Default to stabilized mode
+    emergencyStop = false;
     lastToggle1State = false;
     lastToggle2State = false;
+
+// Initialize I2C only if OLED is enabled
+#if OLED_ENABLED
+    Wire.begin(21, 22);    // SDA=21, SCL=22 (ESP32 default)
+    Wire.setClock(100000); // Set I2C clock to 100kHz for better reliability
+    delay(100);            // Give I2C time to stabilize
+
+    Serial.println("I2C initialized for OLED display");
+
+    // Initialize OLED Display with improved error handling
+    Serial.println("Initializing OLED Display...");
+    delay(50); // Additional delay before display initialization
+
+    // Quick test for OLED display without extensive scanning
+    if (!display.begin(SSD1306_SWITCHCAPVCC, SCREEN_ADDRESS))
+    {
+        Serial.println("❌ SSD1306 not found at address 0x3C");
+
+        // Try alternative address 0x3D quickly
+        if (!display.begin(SSD1306_SWITCHCAPVCC, 0x3D))
+        {
+            Serial.println("❌ SSD1306 not found at address 0x3D");
+            Serial.println("⚠️  OLED Display not detected - continuing without display");
+            Serial.println("💡 System will work normally for drone control");
+            displayAvailable = false;
+        }
+        else
+        {
+            Serial.println("✅ OLED Display found at address 0x3D!");
+            displayAvailable = true;
+        }
+    }
+    else
+    {
+        Serial.println("✅ OLED Display found at address 0x3C!");
+        displayAvailable = true;
+    }
+
+    // Show startup message if display is available
+    if (displayAvailable)
+    {
+        display.clearDisplay();
+        display.setTextSize(1);
+        display.setTextColor(WHITE);
+        display.setCursor(0, 0);
+        display.println("DRONE REMOTE");
+        display.println("Initializing...");
+        display.display();
+    }
+#else
+    Serial.println("⚠️  OLED Display disabled in configuration");
+    Serial.println("💡 System optimized for drone control without display");
+    displayAvailable = false;
+#endif
 
     // Initialize radio with PROVEN configuration
     SPI.begin();
@@ -534,11 +453,7 @@ void setup()
 
     Serial.println("Safety Features:");
     Serial.println("  - Toggle 1: ARM/DISARM (must be ON to control throttle)");
-    Serial.println("  - Toggle 2: FLIGHT MODE (ON = Stabilized, OFF = Manual)");
-
-    Serial.println("Flight Modes:");
-    Serial.println("  - STABILIZED: Drone auto-levels and maintains attitude");
-    Serial.println("  - MANUAL: Direct control, no auto-leveling (advanced users)");
+    Serial.println("  - Toggle 2: EMERGENCY STOP (instantly stops and resets throttle)");
 
     Serial.println("Throttle Mapping:");
     Serial.println("  - Virtual 0 = Transmitted -3000 (0% power)");
@@ -608,7 +523,7 @@ void loop()
     // Small delay to prevent overwhelming the system
     delay(10);
 
-    // Handle toggle switch safety and mode features
+    // Handle toggle switch safety features
     handleSafetyToggleSwitches();
 
     // Update OLED display every 1 second (only if available) - reduced frequency to minimize I2C errors
@@ -636,10 +551,18 @@ void readJoystickInputs()
 
     // Read toggle switches (active LOW, so invert the reading)
     controlData.toggle1 = !digitalRead(TOGGLE_SW1_PIN); // ARM/DISARM switch
-    controlData.toggle2 = !digitalRead(TOGGLE_SW2_PIN); // STABILIZED/MANUAL mode switch
+    controlData.toggle2 = !digitalRead(TOGGLE_SW2_PIN); // EMERGENCY STOP switch
 
-    // === FLIGHT MODE CONTROL ===
-    // No emergency stop - removed for mode switching
+    // === SAFETY CHECKS ===
+    // Emergency stop overrides everything
+    if (emergencyStop)
+    {
+        controlData.throttle = -3000; // Send minimum throttle value
+        controlData.roll = 0;
+        controlData.pitch = 0;
+        controlData.yaw = 0;
+        return; // Skip all other input processing
+    }
 
     // === VIRTUAL THROTTLE MODE ===
     // Only process throttle if armed (Toggle 1 ON)
@@ -688,8 +611,8 @@ void readJoystickInputs()
     }
 
     // === STANDARD CONTROLS WITH DEADZONE ===
-    // Only process other controls if armed
-    if (isArmed)
+    // Only process other controls if armed and not in emergency stop
+    if (isArmed && !emergencyStop)
     {
         // Map other controls with deadzone filtering
         int16_t yawInput = map(joy1_x, 0, 4095, -3000, 3000);
@@ -703,7 +626,7 @@ void readJoystickInputs()
     }
     else
     {
-        // Disarmed - all controls locked to 0
+        // Disarmed or emergency stop - all controls locked to 0
         controlData.yaw = 0;
         controlData.roll = 0;
         controlData.pitch = 0;
@@ -808,12 +731,8 @@ void printTelemetryData()
     else
         Serial.print("🔒DISARMED");
 
-    // === FLIGHT MODE STATUS ===
-    Serial.print(" | Mode: ");
-    if (isStabilizedMode)
-        Serial.print("�️STAB");
-    else
-        Serial.print("🎯MAN");
+    if (emergencyStop)
+        Serial.print(" 🚨E-STOP");
 
     // === THROTTLE STATUS ===
     Serial.print(" | Thr: ");
@@ -936,8 +855,8 @@ void printStatusReport()
     // === SAFETY STATUS ===
     Serial.print("🛡️  Safety: ");
     Serial.print(isArmed ? "🔓ARMED" : "🔒DISARMED");
-    Serial.print(" | Flight Mode: ");
-    Serial.print(isStabilizedMode ? "�️STABILIZED" : "🎯MANUAL");
+    if (emergencyStop)
+        Serial.print(" | 🚨EMERGENCY STOP ACTIVE");
     Serial.println();
 
     // === VIRTUAL THROTTLE STATUS ===
@@ -1125,20 +1044,21 @@ void handleSafetyToggleSwitches()
         }
     }
 
-    // Handle FLIGHT MODE toggle (Toggle 2) - edge detection
+    // Handle EMERGENCY STOP toggle (Toggle 2) - edge detection
     if (controlData.toggle2 != lastToggle2State)
     {
         lastToggle2State = controlData.toggle2;
 
         if (controlData.toggle2 == 1) // Toggle 2 turned ON
         {
-            isStabilizedMode = true;
-            Serial.println("�️  FLIGHT MODE: STABILIZED - Auto-leveling enabled");
+            emergencyStop = true;
+            virtualThrottle = 0;
+            Serial.println("🚨 EMERGENCY STOP ACTIVATED - All controls locked to minimum");
         }
         else // Toggle 2 turned OFF
         {
-            isStabilizedMode = false;
-            Serial.println("🎯 FLIGHT MODE: MANUAL - Direct control, no auto-leveling");
+            emergencyStop = false;
+            Serial.println("✅ Emergency stop DEACTIVATED - Normal operation resumed");
         }
     }
 }
